@@ -4,11 +4,11 @@ etc/proxmox-backup-banner.service /lib/systemd/system/
 etc/proxmox-backup-daily-update.service /lib/systemd/system/
 etc/proxmox-backup-daily-update.timer /lib/systemd/system/
 etc/pbs-enterprise.list /etc/apt/sources.list.d/
-usr/lib/x86_64-linux-gnu/proxmox-backup/proxmox-backup-api
-usr/lib/x86_64-linux-gnu/proxmox-backup/proxmox-backup-proxy
-usr/lib/x86_64-linux-gnu/proxmox-backup/proxmox-backup-banner
-usr/lib/x86_64-linux-gnu/proxmox-backup/proxmox-daily-update
-usr/lib/x86_64-linux-gnu/proxmox-backup/sg-tape-cmd
+usr/lib/aarch64-linux-gnu/proxmox-backup/proxmox-backup-api
+usr/lib/aarch64-linux-gnu/proxmox-backup/proxmox-backup-proxy
+usr/lib/aarch64-linux-gnu/proxmox-backup/proxmox-backup-banner
+usr/lib/aarch64-linux-gnu/proxmox-backup/proxmox-daily-update
+usr/lib/aarch64-linux-gnu/proxmox-backup/sg-tape-cmd
 usr/sbin/proxmox-backup-manager
 usr/bin/pmtx
 usr/bin/pmt

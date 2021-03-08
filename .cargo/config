@@ -1,5 +1,17 @@
-[source]
-[source.debian-packages]
-directory = "/usr/share/cargo/registry"
 [source.crates-io]
-replace-with = "debian-packages"
+replace-with = "vendored-sources"
+
+[source."git://git.proxmox.com/git/pathpatterns.git"]
+git = "git://git.proxmox.com/git/pathpatterns.git"
+replace-with = "vendored-sources"
+
+[source."git://git.proxmox.com/git/proxmox-fuse.git"]
+git = "git://git.proxmox.com/git/proxmox-fuse.git"
+replace-with = "vendored-sources"
+
+[source."git://git.proxmox.com/git/pxar.git"]
+git = "git://git.proxmox.com/git/pxar.git"
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
