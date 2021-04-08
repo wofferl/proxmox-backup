@@ -84,6 +84,24 @@ Ext.define('PBS.TapeManagement.DriveStatus', {
 	    }).show();
 	},
 
+	erase: function() {
+	    let me = this;
+	    let view = me.getView();
+	    let driveid = view.drive;
+	    PBS.Utils.driveCommand(driveid, 'erase-media', {
+		waitMsgTarget: view,
+		method: 'POST',
+		success: function(response) {
+		    Ext.create('Proxmox.window.TaskProgress', {
+			upid: response.result.data,
+			taskDone: function() {
+			    me.reload();
+			},
+		    }).show();
+		},
+	    });
+	},
+
 	ejectMedia: function() {
 	    let me = this;
 	    let view = me.getView();
@@ -194,6 +212,18 @@ Ext.define('PBS.TapeManagement.DriveStatus', {
 	    },
 	},
 	{
+	    text: gettext('Erase'),
+	    xtype: 'proxmoxButton',
+	    handler: 'erase',
+	    iconCls: 'fa fa-trash-o',
+	    dangerous: true,
+	    confirmMsg: gettext('Are you sure you want to erase the inserted tape?'),
+	    disabled: true,
+	    bind: {
+		disabled: '{!online}',
+	    },
+	},
+	{
 	    text: gettext('Catalog'),
 	    xtype: 'proxmoxButton',
 	    handler: 'catalog',
@@ -275,7 +305,7 @@ Ext.define('PBS.TapeManagement.DriveStatusGrid', {
     rows: {
 	'blocksize': {
 	    required: true,
-	    header: gettext('Blocksize'),
+	    header: gettext('Block Size'),
 	    renderer: function(value) {
 		if (!value) {
 		    return gettext('Dynamic');
@@ -400,6 +430,7 @@ Ext.define('PBS.TapeManagement.DriveInfoPanel', {
 	},
 	{
 	    xtype: 'pmxInfoWidget',
+	    reference: 'statewidget',
 	    title: gettext('State'),
 	    bind: {
 		data: {
@@ -408,6 +439,23 @@ Ext.define('PBS.TapeManagement.DriveInfoPanel', {
 	    },
 	},
     ],
+
+    clickState: function(e, t, eOpts) {
+	let me = this;
+	let vm = me.getViewModel();
+	let drive = vm.get('drive');
+	if (t.classList.contains('right-aligned')) {
+	    let upid = drive.state;
+	    if (!upid || !upid.startsWith("UPID")) {
+		return;
+	    }
+
+	    Ext.create('Proxmox.window.TaskViewer', {
+		autoShow: true,
+		upid,
+	    });
+	}
+    },
 
     updateData: function(store) {
 	let me = this;
@@ -422,6 +470,37 @@ Ext.define('PBS.TapeManagement.DriveInfoPanel', {
 	let vm = me.getViewModel();
 	vm.set('drive', record.data);
 	vm.notify();
+	me.updatePointer();
+    },
+
+    updatePointer: function() {
+	let me = this;
+	let stateWidget = me.down('pmxInfoWidget[reference=statewidget]');
+	let stateEl = stateWidget.getEl();
+	if (!stateEl) {
+	    setTimeout(function() {
+		me.updatePointer();
+	    }, 100);
+	    return;
+	}
+
+	let vm = me.getViewModel();
+	let drive = vm.get('drive');
+
+	if (drive.state) {
+	    stateEl.addCls('info-pointer');
+	} else {
+	    stateEl.removeCls('info-pointer');
+	}
+    },
+
+    listeners: {
+	afterrender: function() {
+	    let me = this;
+	    let stateWidget = me.down('pmxInfoWidget[reference=statewidget]');
+	    let stateEl = stateWidget.getEl();
+	    stateEl.on('click', me.clickState, me);
+	},
     },
 
     initComponent: function() {
@@ -430,12 +509,12 @@ Ext.define('PBS.TapeManagement.DriveInfoPanel', {
 	    throw "no drive given";
 	}
 
+	me.callParent();
+
 	let tapeStore = Ext.ComponentQuery.query('navigationtree')[0].tapestore;
 	me.mon(tapeStore, 'load', me.updateData, me);
 	if (tapeStore.isLoaded()) {
 	    me.updateData(tapeStore);
 	}
-
-	me.callParent();
     },
 });

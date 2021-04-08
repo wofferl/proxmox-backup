@@ -72,14 +72,14 @@ static MAM_ATTRIBUTES: &[ (u16, u16, MamFormat, &str) ] = &[
     (0x08_02, 8, MamFormat::ASCII, "Application Version"),
     (0x08_03, 160, MamFormat::ASCII, "User Medium Text Label"),
     (0x08_04, 12, MamFormat::ASCII, "Date And Time Last Written"),
-    (0x08_05, 1, MamFormat::BINARY, "Text Localization Identifer"),
+    (0x08_05, 1, MamFormat::BINARY, "Text Localization Identifier"),
     (0x08_06, 32, MamFormat::ASCII, "Barcode"),
     (0x08_07, 80, MamFormat::ASCII, "Owning Host Textual Name"),
     (0x08_08, 160, MamFormat::ASCII, "Media Pool"),
     (0x08_0B, 16, MamFormat::ASCII, "Application Format Version"),
     (0x08_0C, 50, MamFormat::ASCII, "Volume Coherency Information"),
-    (0x08_20, 36, MamFormat::ASCII, "Medium Globally Unique Identifer"),
-    (0x08_21, 36, MamFormat::ASCII, "Media Pool Globally Unique Identifer"),
+    (0x08_20, 36, MamFormat::ASCII, "Medium Globally Unique Identifier"),
+    (0x08_21, 36, MamFormat::ASCII, "Media Pool Globally Unique Identifier"),
 
     (0x10_00, 28,  MamFormat::BINARY, "Unique Cartridge Identify (UCI)"),
     (0x10_01, 24,  MamFormat::BINARY, "Alternate Unique Cartridge Identify (Alt-UCI)"),
@@ -101,12 +101,13 @@ lazy_static::lazy_static!{
 
 fn read_tape_mam<F: AsRawFd>(file: &mut F) -> Result<Vec<u8>, Error> {
 
-    let mut sg_raw = SgRaw::new(file, 32*1024)?;
+    let alloc_len: u32 = 32*1024;
+    let mut sg_raw = SgRaw::new(file, alloc_len as usize)?;
 
     let mut cmd = Vec::new();
     cmd.extend(&[0x8c, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]);
     cmd.extend(&[0u8, 0u8]); // first attribute
-    cmd.extend(&[0u8, 0u8, 0x8f, 0xff]); // alloc len
+    cmd.extend(&alloc_len.to_be_bytes()); // alloc len
     cmd.extend(&[0u8, 0u8]);
 
     sg_raw.do_command(&cmd)
@@ -114,7 +115,7 @@ fn read_tape_mam<F: AsRawFd>(file: &mut F) -> Result<Vec<u8>, Error> {
         .map(|v| v.to_vec())
 }
 
-/// Read Medium auxiliary memory attributes (cartridge memory) using raw SCSI command. 
+/// Read Medium auxiliary memory attributes (cartridge memory) using raw SCSI command.
 pub fn read_mam_attributes<F: AsRawFd>(file: &mut F) -> Result<Vec<MamAttribute>, Error> {
 
     let data = read_tape_mam(file)?;
@@ -130,8 +131,12 @@ fn decode_mam_attributes(data: &[u8]) -> Result<Vec<MamAttribute>, Error> {
 
     let expected_len = data_len as usize;
 
-    if reader.len() != expected_len {
+
+    if reader.len() < expected_len {
         bail!("read_mam_attributes: got unexpected data len ({} != {})", reader.len(), expected_len);
+    } else if reader.len() > expected_len {
+        // Note: Quantum hh7 returns the allocation_length instead of real data_len
+        reader = &data[4..expected_len+4];
     }
 
     let mut list = Vec::new();

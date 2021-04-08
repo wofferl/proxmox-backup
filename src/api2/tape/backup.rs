@@ -1,10 +1,11 @@
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Mutex, Arc};
 
 use anyhow::{bail, format_err, Error};
 use serde_json::Value;
 
 use proxmox::{
+    try_block,
     api::{
         api,
         RpcEnvironment,
@@ -16,6 +17,7 @@ use proxmox::{
 
 use crate::{
     task_log,
+    task_warn,
     config::{
         self,
         cached_user_info::CachedUserInfo,
@@ -32,6 +34,7 @@ use crate::{
     },
     server::{
         lookup_user_email,
+        TapeBackupJobSummary,
         jobstate::{
             Job,
             JobState,
@@ -42,6 +45,7 @@ use crate::{
         DataStore,
         BackupDir,
         BackupInfo,
+        StoreProgress,
     },
     api2::types::{
         Authid,
@@ -174,8 +178,15 @@ pub fn do_tape_backup_job(
 
     let (drive_config, _digest) = config::drive::config()?;
 
-    // early check/lock before starting worker
-    let drive_lock = lock_tape_device(&drive_config, &setup.drive)?;
+    // for scheduled jobs we acquire the lock later in the worker
+    let drive_lock = if schedule.is_some() {
+        None
+    } else {
+        Some(lock_tape_device(&drive_config, &setup.drive)?)
+    };
+
+    let notify_user = setup.notify_user.as_ref().unwrap_or_else(|| &Userid::root_userid());
+    let email = lookup_user_email(notify_user);
 
     let upid_str = WorkerTask::new_thread(
         &worker_type,
@@ -183,26 +194,40 @@ pub fn do_tape_backup_job(
         auth_id.clone(),
         false,
         move |worker| {
-            let _drive_lock = drive_lock; // keep lock guard
-
-            set_tape_device_state(&setup.drive, &worker.upid().to_string())?;
             job.start(&worker.upid().to_string())?;
+            let mut drive_lock = drive_lock;
 
-            task_log!(worker,"Starting tape backup job '{}'", job_id);
-            if let Some(event_str) = schedule {
-                task_log!(worker,"task triggered by schedule '{}'", event_str);
-            }
+            let (job_result, summary) = match try_block!({
+                if schedule.is_some() {
+                    // for scheduled tape backup jobs, we wait indefinitely for the lock
+                    task_log!(worker, "waiting for drive lock...");
+                    loop {
+                        if let Ok(lock) = lock_tape_device(&drive_config, &setup.drive) {
+                            drive_lock = Some(lock);
+                            break;
+                        } // ignore errors
 
-            let notify_user = setup.notify_user.as_ref().unwrap_or_else(|| &Userid::root_userid());
-            let email = lookup_user_email(notify_user);
+                        worker.check_abort()?;
+                    }
+                }
+                set_tape_device_state(&setup.drive, &worker.upid().to_string())?;
 
-            let job_result = backup_worker(
-                &worker,
-                datastore,
-                &pool_config,
-                &setup,
-                email.clone(),
-            );
+                task_log!(worker,"Starting tape backup job '{}'", job_id);
+                if let Some(event_str) = schedule {
+                    task_log!(worker,"task triggered by schedule '{}'", event_str);
+                }
+
+                backup_worker(
+                    &worker,
+                    datastore,
+                    &pool_config,
+                    &setup,
+                    email.clone(),
+                )
+            }) {
+                Ok(summary) => (Ok(()), summary),
+                Err(err) => (Err(err), Default::default()),
+            };
 
             let status = worker.create_state(&job_result);
 
@@ -212,6 +237,7 @@ pub fn do_tape_backup_job(
                     Some(job.jobname()),
                     &setup,
                     &job_result,
+                    summary,
                 ) {
                     eprintln!("send tape backup notification failed: {}", err);
                 }
@@ -338,13 +364,17 @@ pub fn backup(
         move |worker| {
             let _drive_lock = drive_lock; // keep lock guard
             set_tape_device_state(&setup.drive, &worker.upid().to_string())?;
-            let job_result = backup_worker(
+
+            let (job_result, summary) = match backup_worker(
                 &worker,
                 datastore,
                 &pool_config,
                 &setup,
                 email.clone(),
-            );
+            ) {
+                Ok(summary) => (Ok(()), summary),
+                Err(err) => (Err(err), Default::default()),
+            };
 
             if let Some(email) = email {
                 if let Err(err) = crate::server::send_tape_backup_status(
@@ -352,6 +382,7 @@ pub fn backup(
                     None,
                     &setup,
                     &job_result,
+                    summary,
                 ) {
                     eprintln!("send tape backup notification failed: {}", err);
                 }
@@ -372,16 +403,16 @@ fn backup_worker(
     pool_config: &MediaPoolConfig,
     setup: &TapeBackupJobSetup,
     email: Option<String>,
-) -> Result<(), Error> {
+) -> Result<TapeBackupJobSummary, Error> {
 
     let status_path = Path::new(TAPE_STATUS_DIR);
-
-    let _lock = MediaPool::lock(status_path, &pool_config.name)?;
+    let start = std::time::Instant::now();
+    let mut summary: TapeBackupJobSummary = Default::default();
 
     task_log!(worker, "update media online status");
     let changer_name = update_media_online_status(&setup.drive)?;
 
-    let pool = MediaPool::with_config(status_path, &pool_config, changer_name)?;
+    let pool = MediaPool::with_config(status_path, &pool_config, changer_name, false)?;
 
     let mut pool_writer = PoolWriter::new(pool, &setup.drive, worker, email)?;
 
@@ -389,37 +420,98 @@ fn backup_worker(
 
     group_list.sort_unstable();
 
+    let group_count = group_list.len();
+    task_log!(worker, "found {} groups", group_count);
+
+    let mut progress = StoreProgress::new(group_count as u64);
+
     let latest_only = setup.latest_only.unwrap_or(false);
 
     if latest_only {
         task_log!(worker, "latest-only: true (only considering latest snapshots)");
     }
 
-    for group in group_list {
+    let datastore_name = datastore.name();
+
+    let mut errors = false;
+
+    let mut need_catalog = false; // avoid writing catalog for empty jobs
+
+    for (group_number, group) in group_list.into_iter().enumerate() {
+        progress.done_groups = group_number as u64;
+        progress.done_snapshots = 0;
+        progress.group_snapshots = 0;
+
         let mut snapshot_list = group.list_backups(&datastore.base_path())?;
 
         BackupInfo::sort_list(&mut snapshot_list, true); // oldest first
 
         if latest_only {
+            progress.group_snapshots = 1;
             if let Some(info) = snapshot_list.pop() {
-                if pool_writer.contains_snapshot(&info.backup_dir.to_string()) {
+                if pool_writer.contains_snapshot(datastore_name, &info.backup_dir.to_string()) {
+                    task_log!(worker, "skip snapshot {}", info.backup_dir);
                     continue;
                 }
-                task_log!(worker, "backup snapshot {}", info.backup_dir);
-                backup_snapshot(worker, &mut pool_writer, datastore.clone(), info.backup_dir)?;
+
+                need_catalog = true;
+
+                let snapshot_name = info.backup_dir.to_string();
+                if !backup_snapshot(worker, &mut pool_writer, datastore.clone(), info.backup_dir)? {
+                    errors = true;
+                } else {
+                    summary.snapshot_list.push(snapshot_name);
+                }
+                progress.done_snapshots = 1;
+                task_log!(
+                    worker,
+                    "percentage done: {}",
+                    progress
+                );
             }
         } else {
-            for info in snapshot_list {
-                if pool_writer.contains_snapshot(&info.backup_dir.to_string()) {
+            progress.group_snapshots = snapshot_list.len() as u64;
+            for (snapshot_number, info) in snapshot_list.into_iter().enumerate() {
+                if pool_writer.contains_snapshot(datastore_name, &info.backup_dir.to_string()) {
+                    task_log!(worker, "skip snapshot {}", info.backup_dir);
                     continue;
                 }
-                task_log!(worker, "backup snapshot {}", info.backup_dir);
-                backup_snapshot(worker, &mut pool_writer, datastore.clone(), info.backup_dir)?;
+
+                need_catalog = true;
+
+                let snapshot_name = info.backup_dir.to_string();
+                if !backup_snapshot(worker, &mut pool_writer, datastore.clone(), info.backup_dir)? {
+                    errors = true;
+                } else {
+                    summary.snapshot_list.push(snapshot_name);
+                }
+                progress.done_snapshots = snapshot_number as u64 + 1;
+                task_log!(
+                    worker,
+                    "percentage done: {}",
+                    progress
+                );
             }
         }
     }
 
     pool_writer.commit()?;
+
+    if need_catalog {
+        task_log!(worker, "append media catalog");
+
+        let uuid = pool_writer.load_writable_media(worker)?;
+        let done = pool_writer.append_catalog_archive(worker)?;
+        if !done {
+            task_log!(worker, "catalog does not fit on tape, writing to next volume");
+            pool_writer.set_media_status_full(&uuid)?;
+            pool_writer.load_writable_media(worker)?;
+            let done = pool_writer.append_catalog_archive(worker)?;
+            if !done {
+                bail!("write_catalog_archive failed on second media");
+            }
+        }
+    }
 
     if setup.export_media_set.unwrap_or(false) {
         pool_writer.export_media_set(worker)?;
@@ -427,7 +519,13 @@ fn backup_worker(
         pool_writer.eject_media(worker)?;
     }
 
-    Ok(())
+    if errors {
+        bail!("Tape backup finished with some errors. Please check the task log.");
+    }
+
+    summary.duration = start.elapsed();
+
+    Ok(summary)
 }
 
 // Try to update the the media online status
@@ -460,31 +558,51 @@ pub fn backup_snapshot(
     pool_writer: &mut PoolWriter,
     datastore: Arc<DataStore>,
     snapshot: BackupDir,
-) -> Result<(), Error> {
+) -> Result<bool, Error> {
 
-    task_log!(worker, "start backup {}:{}", datastore.name(), snapshot);
+    task_log!(worker, "backup snapshot {}", snapshot);
 
-    let snapshot_reader = SnapshotReader::new(datastore.clone(), snapshot.clone())?;
+    let snapshot_reader = match SnapshotReader::new(datastore.clone(), snapshot.clone()) {
+        Ok(reader) => reader,
+        Err(err) => {
+            // ignore missing snapshots and continue
+            task_warn!(worker, "failed opening snapshot '{}': {}", snapshot, err);
+            return Ok(false);
+        }
+    };
 
-    let mut chunk_iter = snapshot_reader.chunk_iterator()?.peekable();
+    let snapshot_reader = Arc::new(Mutex::new(snapshot_reader));
+
+    let (reader_thread, chunk_iter) = pool_writer.spawn_chunk_reader_thread(
+        datastore.clone(),
+        snapshot_reader.clone(),
+    )?;
+
+    let mut chunk_iter = chunk_iter.peekable();
 
     loop {
         worker.check_abort()?;
 
         // test is we have remaining chunks
-        if chunk_iter.peek().is_none() {
-            break;
+        match chunk_iter.peek() {
+            None => break,
+            Some(Ok(_)) => { /* Ok */ },
+            Some(Err(err)) => bail!("{}", err),
         }
 
         let uuid = pool_writer.load_writable_media(worker)?;
 
         worker.check_abort()?;
 
-        let (leom, _bytes) = pool_writer.append_chunk_archive(worker, &datastore, &mut chunk_iter)?;
+        let (leom, _bytes) = pool_writer.append_chunk_archive(worker, &mut chunk_iter, datastore.name())?;
 
         if leom {
             pool_writer.set_media_status_full(&uuid)?;
         }
+    }
+
+    if let Err(_) = reader_thread.join() {
+        bail!("chunk reader thread failed");
     }
 
     worker.check_abort()?;
@@ -492,6 +610,8 @@ pub fn backup_snapshot(
     let uuid = pool_writer.load_writable_media(worker)?;
 
     worker.check_abort()?;
+
+    let snapshot_reader = snapshot_reader.lock().unwrap();
 
     let (done, _bytes) = pool_writer.append_snapshot_archive(worker, &snapshot_reader)?;
 
@@ -511,5 +631,5 @@ pub fn backup_snapshot(
 
     task_log!(worker, "end backup {}:{}", datastore.name(), snapshot);
 
-    Ok(())
+    Ok(true)
 }

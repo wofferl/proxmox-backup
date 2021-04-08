@@ -296,6 +296,51 @@ impl TapeDriver for VirtualTapeHandle {
                     .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
 
                 *pos = index.files;
+
+                self.store_status(&status)
+                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+
+                Ok(())
+            }
+            None => bail!("drive is empty (no tape loaded)."),
+        }
+    }
+
+    fn forward_space_count_files(&mut self, count: usize) -> Result<(), Error> {
+        let mut status = self.load_status()?;
+        match status.current_tape {
+            Some(VirtualTapeStatus { ref name, ref mut pos }) => {
+
+                let index = self.load_tape_index(name)
+                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+
+                let new_pos = *pos + count;
+                if new_pos <= index.files {
+                    *pos = new_pos;
+                } else {
+                    bail!("forward_space_count_files failed: move beyond EOT");
+                }
+
+                self.store_status(&status)
+                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+
+                Ok(())
+            }
+            None => bail!("drive is empty (no tape loaded)."),
+        }
+    }
+
+    fn backward_space_count_files(&mut self, count: usize) -> Result<(), Error> {
+        let mut status = self.load_status()?;
+        match status.current_tape {
+            Some(VirtualTapeStatus { ref mut pos, .. }) => {
+
+                if count <= *pos {
+                    *pos = *pos - count;
+                } else {
+                    bail!("backward_space_count_files failed: move before BOT");
+                }
+
                 self.store_status(&status)
                     .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
 
@@ -429,7 +474,7 @@ impl MediaChange for VirtualTapeHandle {
     }
 
     fn transfer_media(&mut self, _from: u64, _to: u64) -> Result<MtxStatus, Error> {
-        bail!("media tranfer is not implemented!");
+        bail!("media transfer is not implemented!");
     }
 
     fn export_media(&mut self, _label_text: &str) -> Result<Option<u64>, Error> {

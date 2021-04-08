@@ -4,7 +4,7 @@
 //!
 //! See: `/usr/include/scsi/sg_pt.h`
 //!
-//! The SCSI Commands Reference Manual also contains some usefull information.
+//! The SCSI Commands Reference Manual also contains some useful information.
 
 use std::os::unix::io::AsRawFd;
 use std::ptr::NonNull;
@@ -44,32 +44,38 @@ impl ToString for SenseInfo {
 }
 
 #[derive(Debug)]
-pub struct ScsiError {
-    pub error: Error,
-    pub sense: Option<SenseInfo>,
+pub enum ScsiError {
+    Error(Error),
+    Sense(SenseInfo),
 }
 
 impl std::fmt::Display for ScsiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.error)
+        match self {
+            ScsiError::Error(err) => write!(f, "{}", err),
+            ScsiError::Sense(sense) =>  write!(f, "{}", sense.to_string()),
+        }
     }
 }
 
 impl std::error::Error for ScsiError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.error.source()
+         match self {
+             ScsiError::Error(err) => err.source(),
+             ScsiError::Sense(_) => None,
+         }
     }
 }
 
 impl From<anyhow::Error> for ScsiError {
     fn from(error: anyhow::Error) -> Self {
-        Self { error, sense: None }
+        Self::Error(error)
     }
 }
 
 impl From<std::io::Error> for ScsiError {
     fn from(error: std::io::Error) -> Self {
-        Self { error: error.into(), sense: None }
+        Self::Error(error.into())
     }
 }
 
@@ -483,10 +489,7 @@ impl <'a, F: AsRawFd> SgRaw<'a, F> {
                     }
                 };
 
-                return Err(ScsiError {
-                    error: format_err!("{}", sense.to_string()),
-                    sense: Some(sense),
-                });
+                return Err(ScsiError::Sense(sense));
             }
             SCSI_PT_RESULT_TRANSPORT_ERR => return Err(format_err!("scsi command failed: transport error").into()),
             SCSI_PT_RESULT_OS_ERR => {
@@ -506,7 +509,7 @@ impl <'a, F: AsRawFd> SgRaw<'a, F> {
         }
 
         if self.buffer.len() < 16 {
-            return Err(format_err!("output buffer too small").into());
+            return Err(format_err!("input buffer too small").into());
         }
 
         let mut ptvp = self.create_scsi_pt_obj()?;
@@ -528,6 +531,45 @@ impl <'a, F: AsRawFd> SgRaw<'a, F> {
         let data_len = self.buffer.len() - resid;
 
         Ok(&self.buffer[..data_len])
+    }
+
+    /// Run the specified RAW SCSI command, use data as input buffer
+    pub fn do_in_command<'b>(&mut self, cmd: &[u8], data: &'b mut [u8]) -> Result<&'b [u8], ScsiError> {
+
+        if !unsafe { sg_is_scsi_cdb(cmd.as_ptr(), cmd.len() as c_int) } {
+            return Err(format_err!("no valid SCSI command").into());
+        }
+
+        if data.len() == 0 {
+            return Err(format_err!("got zero-sized input buffer").into());
+        }
+
+        let mut ptvp = self.create_scsi_pt_obj()?;
+
+        unsafe {
+            set_scsi_pt_data_in(
+                ptvp.as_mut_ptr(),
+                data.as_mut_ptr(),
+                data.len() as c_int,
+            );
+
+            set_scsi_pt_cdb(
+                ptvp.as_mut_ptr(),
+                cmd.as_ptr(),
+                cmd.len() as c_int,
+            );
+        };
+
+        self.do_scsi_pt_checked(&mut ptvp)?;
+
+        let resid = unsafe { get_scsi_pt_resid(ptvp.as_ptr()) } as usize;
+
+        if resid > data.len() {
+            return Err(format_err!("do_scsi_pt failed - got strange resid (value too big)").into());
+        }
+        let data_len = data.len() - resid;
+
+        Ok(&data[..data_len])
     }
 
     /// Run dataout command

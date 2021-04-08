@@ -3,11 +3,13 @@
 //! A set of backup medias.
 //!
 //! This struct manages backup media state during backup. The main
-//! purpose is to allocate media sets and assing new tapes to it.
+//! purpose is to allocate media sets and assign new tapes to it.
 //!
 //!
 
-use std::path::Path;
+use std::path::{PathBuf, Path};
+use std::fs::File;
+
 use anyhow::{bail, Error};
 use ::serde::{Deserialize, Serialize};
 
@@ -27,6 +29,9 @@ use crate::{
         MediaId,
         MediaSet,
         Inventory,
+        lock_media_set,
+        lock_media_pool,
+        lock_unassigned_media_pool,
         file_formats::{
             MediaLabel,
             MediaSetLabel,
@@ -34,13 +39,11 @@ use crate::{
     }
 };
 
-/// Media Pool lock guard
-pub struct MediaPoolLockGuard(std::fs::File);
-
 /// Media Pool
 pub struct MediaPool {
 
     name: String,
+    state_path: PathBuf,
 
     media_set_policy: MediaSetPolicy,
     retention: RetentionPolicy,
@@ -48,11 +51,16 @@ pub struct MediaPool {
     changer_name: Option<String>,
     force_media_availability: bool,
 
+    // Set this if you do not need to allocate writeable media -  this
+    // is useful for list_media()
+    no_media_set_locking: bool,
+
     encrypt_fingerprint: Option<Fingerprint>,
 
     inventory: Inventory,
 
     current_media_set: MediaSet,
+    current_media_set_lock: Option<File>,
 }
 
 impl MediaPool {
@@ -71,7 +79,14 @@ impl MediaPool {
         retention: RetentionPolicy,
         changer_name: Option<String>,
         encrypt_fingerprint: Option<Fingerprint>,
+        no_media_set_locking: bool, // for list_media()
      ) -> Result<Self, Error> {
+
+        let _pool_lock = if no_media_set_locking {
+            None
+        } else {
+            Some(lock_media_pool(state_path, name)?)
+        };
 
         let inventory = Inventory::load(state_path)?;
 
@@ -80,15 +95,24 @@ impl MediaPool {
             None => MediaSet::new(),
         };
 
+        let current_media_set_lock = if no_media_set_locking {
+            None
+        } else {
+            Some(lock_media_set(state_path, current_media_set.uuid(), None)?)
+        };
+
         Ok(MediaPool {
             name: String::from(name),
+            state_path: state_path.to_owned(),
             media_set_policy,
             retention,
             changer_name,
             inventory,
             current_media_set,
+            current_media_set_lock,
             encrypt_fingerprint,
             force_media_availability: false,
+            no_media_set_locking,
         })
     }
 
@@ -99,9 +123,9 @@ impl MediaPool {
         self.force_media_availability = true;
     }
 
-    /// Returns the Uuid of the current media set
-    pub fn current_media_set(&self) -> &Uuid {
-        self.current_media_set.uuid()
+    /// Returns the the current media set
+    pub fn current_media_set(&self) -> &MediaSet {
+        &self.current_media_set
     }
 
     /// Creates a new instance using the media pool configuration
@@ -109,6 +133,7 @@ impl MediaPool {
         state_path: &Path,
         config: &MediaPoolConfig,
         changer_name: Option<String>,
+        no_media_set_locking: bool, // for list_media()
     ) -> Result<Self, Error> {
 
         let allocation = config.allocation.clone().unwrap_or_else(|| String::from("continue")).parse()?;
@@ -127,6 +152,7 @@ impl MediaPool {
             retention,
             changer_name,
             encrypt_fingerprint,
+            no_media_set_locking,
         )
     }
 
@@ -135,7 +161,7 @@ impl MediaPool {
         &self.name
     }
 
-    /// Retruns encryption settings
+    /// Returns encryption settings
     pub fn encrypt_fingerprint(&self) -> Option<Fingerprint> {
         self.encrypt_fingerprint.clone()
     }
@@ -237,9 +263,20 @@ impl MediaPool {
     /// status, so this must not change persistent/saved state.
     ///
     /// Returns the reason why we started a new media set (if we do)
-    pub fn start_write_session(&mut self, current_time: i64) -> Result<Option<String>, Error> {
+    pub fn start_write_session(
+        &mut self,
+        current_time: i64,
+    ) -> Result<Option<String>, Error> {
 
-         let mut create_new_set = match self.current_set_usable() {
+        let _pool_lock = if self.no_media_set_locking {
+            None
+        } else {
+            Some(lock_media_pool(&self.state_path, &self.name)?)
+        };
+
+        self.inventory.reload()?;
+
+        let mut create_new_set = match self.current_set_usable() {
              Err(err) => {
                  Some(err.to_string())
              }
@@ -266,6 +303,14 @@ impl MediaPool {
 
         if create_new_set.is_some() {
             let media_set = MediaSet::new();
+
+            let current_media_set_lock = if self.no_media_set_locking {
+                None
+            } else {
+                Some(lock_media_set(&self.state_path, media_set.uuid(), None)?)
+            };
+
+            self.current_media_set_lock = current_media_set_lock;
             self.current_media_set = media_set;
         }
 
@@ -284,7 +329,7 @@ impl MediaPool {
         Ok(list)
     }
 
-    // tests if the media data is considered as expired at sepcified time
+    // tests if the media data is considered as expired at specified time
     pub fn media_is_expired(&self, media: &BackupMedia, current_time: i64) -> bool {
         if media.status() != &MediaStatus::Full {
             return false;
@@ -325,6 +370,10 @@ impl MediaPool {
 
     fn add_media_to_current_set(&mut self, mut media_id: MediaId, current_time: i64) -> Result<(), Error> {
 
+        if self.current_media_set_lock.is_none() {
+            bail!("add_media_to_current_set: media set is not locked - internal error");
+        }
+
         let seq_nr = self.current_media_set.media_list().len() as u64;
 
         let pool = self.name.clone();
@@ -355,6 +404,10 @@ impl MediaPool {
     /// Allocates a writable media to the current media set
     pub fn alloc_writable_media(&mut self, current_time: i64) -> Result<Uuid, Error> {
 
+        if self.current_media_set_lock.is_none() {
+            bail!("alloc_writable_media: media set is not locked - internal error");
+        }
+
         let last_is_writable = self.current_set_usable()?;
 
         if last_is_writable {
@@ -365,71 +418,98 @@ impl MediaPool {
 
         // try to find empty media in pool, add to media set
 
-        let media_list = self.list_media();
+        { // limit pool lock scope
+            let _pool_lock = lock_media_pool(&self.state_path, &self.name)?;
 
-        let mut empty_media = Vec::new();
-        let mut used_media = Vec::new();
+            self.inventory.reload()?;
 
-        for media in media_list.into_iter() {
-            if !self.location_is_available(media.location()) {
-                continue;
-            }
-            // already part of a media set?
-            if media.media_set_label().is_some() {
-                used_media.push(media);
-            } else {
-                // only consider writable empty media
-                if media.status() == &MediaStatus::Writable {
-                    empty_media.push(media);
-                }
-            }
-        }
+            let media_list = self.list_media();
 
-        // sort empty_media, newest first -> oldest last
-        empty_media.sort_unstable_by(|a, b| b.label().ctime.cmp(&a.label().ctime));
+            let mut empty_media = Vec::new();
+            let mut used_media = Vec::new();
 
-        if let Some(media) = empty_media.pop() {
-            // found empty media, add to media set an use it
-            let uuid = media.uuid().clone();
-            self.add_media_to_current_set(media.into_id(), current_time)?;
-            return Ok(uuid);
-        }
-
-        println!("no empty media in pool, try to reuse expired media");
-
-        let mut expired_media = Vec::new();
-
-        for media in used_media.into_iter() {
-            if let Some(set) = media.media_set_label() {
-                if &set.uuid == self.current_media_set.uuid() {
+            for media in media_list.into_iter() {
+                if !self.location_is_available(media.location()) {
                     continue;
                 }
-            } else {
-                continue;
+                // already part of a media set?
+                if media.media_set_label().is_some() {
+                    used_media.push(media);
+                } else {
+                    // only consider writable empty media
+                    if media.status() == &MediaStatus::Writable {
+                        empty_media.push(media);
+                    }
+                }
             }
 
-            if self.media_is_expired(&media, current_time) {
-                println!("found expired media on media '{}'", media.label_text());
-                expired_media.push(media);
+            // sort empty_media, newest first -> oldest last
+            empty_media.sort_unstable_by(|a, b| {
+                let mut res = b.label().ctime.cmp(&a.label().ctime);
+                if res == std::cmp::Ordering::Equal {
+                    res = b.label().label_text.cmp(&a.label().label_text);
+                }
+                res
+            });
+
+            if let Some(media) = empty_media.pop() {
+                // found empty media, add to media set an use it
+                let uuid = media.uuid().clone();
+                self.add_media_to_current_set(media.into_id(), current_time)?;
+                return Ok(uuid);
             }
-        }
 
-        // sort expired_media, newest first -> oldest last
-        expired_media.sort_unstable_by(|a, b| {
-            b.media_set_label().unwrap().ctime.cmp(&a.media_set_label().unwrap().ctime)
-        });
+            println!("no empty media in pool, try to reuse expired media");
 
-        if let Some(media) = expired_media.pop() {
-            println!("reuse expired media '{}'", media.label_text());
-            let uuid = media.uuid().clone();
-            self.add_media_to_current_set(media.into_id(), current_time)?;
-            return Ok(uuid);
+            let mut expired_media = Vec::new();
+
+            for media in used_media.into_iter() {
+                if let Some(set) = media.media_set_label() {
+                    if &set.uuid == self.current_media_set.uuid() {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+
+                if self.media_is_expired(&media, current_time) {
+                    println!("found expired media on media '{}'", media.label_text());
+                    expired_media.push(media);
+                }
+            }
+
+            // sort expired_media, newest first -> oldest last
+            expired_media.sort_unstable_by(|a, b| {
+                let mut res = b.media_set_label().unwrap().ctime.cmp(&a.media_set_label().unwrap().ctime);
+                if res == std::cmp::Ordering::Equal {
+                    res = b.label().label_text.cmp(&a.label().label_text);
+                }
+                res
+            });
+
+            while let Some(media) = expired_media.pop() {
+                // check if we can modify the media-set (i.e. skip
+                // media used by a restore job)
+                if let Ok(_media_set_lock) = lock_media_set(
+                    &self.state_path,
+                    &media.media_set_label().unwrap().uuid,
+                    Some(std::time::Duration::new(0, 0)), // do not wait
+                ) {
+                    println!("reuse expired media '{}'", media.label_text());
+                    let uuid = media.uuid().clone();
+                    self.add_media_to_current_set(media.into_id(), current_time)?;
+                    return Ok(uuid);
+                }
+            }
         }
 
         println!("no expired media in pool, try to find unassigned/free media");
 
         // try unassigned media
-        // fixme: lock free media pool to avoid races
+        let _lock = lock_unassigned_media_pool(&self.state_path)?;
+
+        self.inventory.reload()?;
+
         let mut free_media = Vec::new();
 
         for media_id in self.inventory.list_unassigned_media() {
@@ -446,6 +526,15 @@ impl MediaPool {
 
             free_media.push(media_id);
         }
+
+        // sort free_media, newest first -> oldest last
+        free_media.sort_unstable_by(|a, b| {
+            let mut res = b.label.ctime.cmp(&a.label.ctime);
+            if res == std::cmp::Ordering::Equal {
+                res = b.label.label_text.cmp(&a.label.label_text);
+            }
+            res
+        });
 
         if let Some(media_id) = free_media.pop() {
             println!("use free media '{}'", media_id.label.label_text);
@@ -537,17 +626,6 @@ impl MediaPool {
         self.inventory.generate_media_set_name(media_set_uuid, template)
     }
 
-    /// Lock the pool
-     pub fn lock(base_path: &Path, name: &str) -> Result<MediaPoolLockGuard, Error> {
-        let mut path = base_path.to_owned();
-        path.push(format!(".{}", name));
-        path.set_extension("lck");
-
-        let timeout = std::time::Duration::new(10, 0);
-        let lock = proxmox::tools::fs::open_file_locked(&path, timeout, true)?;
-
-        Ok(MediaPoolLockGuard(lock))
-    }
 }
 
 /// Backup media

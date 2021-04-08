@@ -13,6 +13,9 @@ pub use chunk_archive::*;
 mod snapshot_archive;
 pub use snapshot_archive::*;
 
+mod catalog_archive;
+pub use catalog_archive::*;
+
 mod multi_volume_writer;
 pub use multi_volume_writer::*;
 
@@ -44,12 +47,22 @@ pub const PROXMOX_BACKUP_MEDIA_LABEL_MAGIC_1_0: [u8; 8] = [42, 5, 191, 60, 176, 
 pub const PROXMOX_BACKUP_MEDIA_SET_LABEL_MAGIC_1_0: [u8; 8] = [8, 96, 99, 249, 47, 151, 83, 216];
 
 // openssl::sha::sha256(b"Proxmox Backup Chunk Archive v1.0")[0..8]
+// only used in unreleased version - no longer supported
 pub const PROXMOX_BACKUP_CHUNK_ARCHIVE_MAGIC_1_0: [u8; 8] = [62, 173, 167, 95, 49, 76, 6, 110];
+// openssl::sha::sha256(b"Proxmox Backup Chunk Archive v1.1")[0..8]
+pub const PROXMOX_BACKUP_CHUNK_ARCHIVE_MAGIC_1_1: [u8; 8] = [109, 49, 99, 109, 215, 2, 131, 191];
+
 // openssl::sha::sha256(b"Proxmox Backup Chunk Archive Entry v1.0")[0..8]
 pub const PROXMOX_BACKUP_CHUNK_ARCHIVE_ENTRY_MAGIC_1_0: [u8; 8] = [72, 87, 109, 242, 222, 66, 143, 220];
 
 // openssl::sha::sha256(b"Proxmox Backup Snapshot Archive v1.0")[0..8];
+// only used in unreleased version - no longer supported
 pub const PROXMOX_BACKUP_SNAPSHOT_ARCHIVE_MAGIC_1_0: [u8; 8] = [9, 182, 2, 31, 125, 232, 114, 133];
+// openssl::sha::sha256(b"Proxmox Backup Snapshot Archive v1.1")[0..8];
+pub const PROXMOX_BACKUP_SNAPSHOT_ARCHIVE_MAGIC_1_1: [u8; 8] = [218, 22, 21, 208, 17, 226, 154, 98];
+
+// openssl::sha::sha256(b"Proxmox Backup Catalog Archive v1.0")[0..8];
+pub const PROXMOX_BACKUP_CATALOG_ARCHIVE_MAGIC_1_0: [u8; 8] = [183, 207, 199, 37, 158, 153, 30, 115];
 
 lazy_static::lazy_static!{
     // Map content magic numbers to human readable names.
@@ -58,7 +71,10 @@ lazy_static::lazy_static!{
         map.insert(&PROXMOX_BACKUP_MEDIA_LABEL_MAGIC_1_0, "Proxmox Backup Tape Label v1.0");
         map.insert(&PROXMOX_BACKUP_MEDIA_SET_LABEL_MAGIC_1_0, "Proxmox Backup MediaSet Label v1.0");
         map.insert(&PROXMOX_BACKUP_CHUNK_ARCHIVE_MAGIC_1_0, "Proxmox Backup Chunk Archive v1.0");
+        map.insert(&PROXMOX_BACKUP_CHUNK_ARCHIVE_MAGIC_1_1, "Proxmox Backup Chunk Archive v1.1");
         map.insert(&PROXMOX_BACKUP_SNAPSHOT_ARCHIVE_MAGIC_1_0, "Proxmox Backup Snapshot Archive v1.0");
+        map.insert(&PROXMOX_BACKUP_SNAPSHOT_ARCHIVE_MAGIC_1_1, "Proxmox Backup Snapshot Archive v1.1");
+        map.insert(&PROXMOX_BACKUP_CATALOG_ARCHIVE_MAGIC_1_0, "Proxmox Backup Catalog Archive v1.0");
         map
     };
 }
@@ -172,6 +188,13 @@ impl MediaContentHeader {
     }
 }
 
+#[derive(Deserialize, Serialize)]
+/// Header for chunk archives
+pub struct ChunkArchiveHeader {
+    // Datastore name
+    pub store: String,
+}
+
 #[derive(Endian)]
 #[repr(C,packed)]
 /// Header for data blobs inside a chunk archive
@@ -182,6 +205,26 @@ pub struct ChunkArchiveEntryHeader {
     pub digest: [u8; 32],
     /// Chunk size
     pub size: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+/// Header for snapshot archives
+pub struct SnapshotArchiveHeader {
+    /// Snapshot name
+    pub snapshot: String,
+    /// Datastore name
+    pub store: String,
+}
+
+#[derive(Deserialize, Serialize)]
+/// Header for Catalog archives
+pub struct CatalogArchiveHeader {
+    /// The uuid of the media the catalog is for
+    pub uuid: Uuid,
+    /// The media set uuid the catalog is for
+    pub media_set_uuid: Uuid,
+    /// Media sequence number
+    pub seq_nr: u64,
 }
 
 #[derive(Serialize,Deserialize,Clone,Debug)]
@@ -245,9 +288,12 @@ impl BlockHeader {
     pub fn new() -> Box<Self> {
         use std::alloc::{alloc_zeroed, Layout};
 
+        // align to PAGESIZE, so that we can use it with SG_IO
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+
         let mut buffer = unsafe {
             let ptr = alloc_zeroed(
-                Layout::from_size_align(Self::SIZE, std::mem::align_of::<u64>())
+                 Layout::from_size_align(Self::SIZE, page_size)
                     .unwrap(),
             );
             Box::from_raw(

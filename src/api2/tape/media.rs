@@ -122,7 +122,7 @@ pub async fn list_media(
         let config: MediaPoolConfig = config.lookup("pool", pool_name)?;
 
         let changer_name = None; // assume standalone drive
-        let mut pool = MediaPool::with_config(status_path, &config, changer_name)?;
+        let mut pool = MediaPool::with_config(status_path, &config, changer_name, true)?;
 
         let current_time = proxmox::tools::time::epoch_i64();
 
@@ -432,29 +432,32 @@ pub fn list_content(
             .generate_media_set_name(&set.uuid, template)
             .unwrap_or_else(|_| set.uuid.to_string());
 
-        let catalog = MediaCatalog::open(status_path, &media_id.label.uuid, false, false)?;
+        let catalog = MediaCatalog::open(status_path, &media_id, false, false)?;
 
-        for snapshot in catalog.snapshot_index().keys() {
-            let backup_dir: BackupDir = snapshot.parse()?;
+        for (store, content) in catalog.content() {
+            for snapshot in content.snapshot_index.keys() {
+                let backup_dir: BackupDir = snapshot.parse()?;
 
-            if let Some(ref backup_type) = filter.backup_type {
-                if backup_dir.group().backup_type() != backup_type { continue; }
+                if let Some(ref backup_type) = filter.backup_type {
+                    if backup_dir.group().backup_type() != backup_type { continue; }
+                }
+                if let Some(ref backup_id) = filter.backup_id {
+                    if backup_dir.group().backup_id() != backup_id { continue; }
+                }
+
+                list.push(MediaContentEntry {
+                    uuid: media_id.label.uuid.clone(),
+                    label_text: media_id.label.label_text.to_string(),
+                    pool: set.pool.clone(),
+                    media_set_name: media_set_name.clone(),
+                    media_set_uuid: set.uuid.clone(),
+                    media_set_ctime: set.ctime,
+                    seq_nr: set.seq_nr,
+                    snapshot: snapshot.to_owned(),
+                    store: store.to_owned(),
+                    backup_time: backup_dir.backup_time(),
+                });
             }
-            if let Some(ref backup_id) = filter.backup_id {
-                if backup_dir.group().backup_id() != backup_id { continue; }
-            }
-
-            list.push(MediaContentEntry {
-                uuid: media_id.label.uuid.clone(),
-                label_text: media_id.label.label_text.to_string(),
-                pool: set.pool.clone(),
-                media_set_name: media_set_name.clone(),
-                media_set_uuid: set.uuid.clone(),
-                media_set_ctime: set.ctime,
-                seq_nr: set.seq_nr,
-                snapshot: snapshot.to_owned(),
-                backup_time: backup_dir.backup_time(),
-            });
         }
     }
 
@@ -497,7 +500,7 @@ pub fn get_media_status(uuid: Uuid) -> Result<MediaStatus, Error> {
 /// Update media status (None, 'full', 'damaged' or 'retired')
 ///
 /// It is not allowed to set status to 'writable' or 'unknown' (those
-/// are internaly managed states).
+/// are internally managed states).
 pub fn update_media_status(uuid: Uuid, status: Option<MediaStatus>) -> Result<(), Error> {
 
     let status_path = Path::new(TAPE_STATUS_DIR);

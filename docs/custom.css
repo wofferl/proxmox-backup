@@ -57,6 +57,11 @@ div.sphinxsidebar h3 {
 div.sphinxsidebar h1.logo-name {
     display: none;
 }
+
+div.document, div.footer {
+    width: min(100%, 1320px);
+}
+
 @media screen and (max-width: 875px) {
     div.sphinxsidebar p.logo {
         display: initial;
@@ -65,9 +70,19 @@ div.sphinxsidebar h1.logo-name {
         display: block;
     }
     div.sphinxsidebar span {
-        color: #AAA;
+        color: #EEE;
     }
-    ul li.toctree-l1 > a {
+    .sphinxsidebar ul li.toctree-l1 > a, div.sphinxsidebar a {
         color: #FFF;
+    }
+    div.sphinxsidebar {
+        background-color: #555;
+    }
+    div.body {
+        min-width: 300px;
+    }
+    div.footer {
+        display: block;
+        margin: 15px auto 0px auto;
     }
 }

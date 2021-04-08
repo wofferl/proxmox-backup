@@ -65,10 +65,10 @@ Main Features
 :Compression: The ultra-fast Zstandard_ compression is able to compress
    several gigabytes of data per second.
 
-:Encryption: Backups can be encrypted on the client-side, using AES-256 in
-   Galois/Counter Mode (GCM_). This authenticated encryption (AE_) mode
-   provides very high performance on modern hardware. In addition to client-side
-   encryption, all data is transferred via a secure TLS connection.
+:Encryption: Backups can be encrypted on the client-side, using AES-256 GCM_.
+   This authenticated encryption (AE_) mode provides very high performance on
+   modern hardware. In addition to client-side encryption, all data is
+   transferred via a secure TLS connection.
 
 :Web interface: Manage the Proxmox Backup Server with the integrated, web-based
    user interface.
@@ -76,8 +76,16 @@ Main Features
 :Open Source: No secrets. Proxmox Backup Server is free and open-source
    software. The source code is licensed under AGPL, v3.
 
-:Support: Enterprise support will be available from `Proxmox`_ once the beta
-   phase is over.
+:No Limits: Proxmox Backup Server has no artifical limits for backup storage or
+   backup-clients.
+
+:Enterprise Support: Proxmox Server Solutions GmbH offers enterprise support in
+   form of `Proxmox Backup Server Subscription Plans
+   <https://www.proxmox.com/en/proxmox-backup-server/pricing>`_. Users at every
+   subscription level get access to the Proxmox Backup :ref:`Enterprise
+   Repository <sysadmin_package_repos_enterprise>`. In addition, with a Basic,
+   Standard or Premium subscription, users have access to the :ref:`Proxmox
+   Customer Portal <get_help_enterprise_support>`.
 
 
 Reasons for Data Backup?
@@ -117,8 +125,8 @@ Proxmox Backup Server consists of multiple components:
 * A client CLI tool (`proxmox-backup-client`) to access the server easily from
   any `Linux amd64` environment
 
-Aside from the web interface, everything is written in the Rust programming
-language.
+Aside from the web interface, most parts of Proxmox Backup Server are written in
+the Rust programming language.
 
  "The Rust programming language helps you write faster, more reliable software.
  High-level ergonomics and low-level control are often at odds in programming
@@ -133,6 +141,17 @@ language.
 
 Getting Help
 ------------
+
+.. _get_help_enterprise_support:
+
+Enterprise Support
+~~~~~~~~~~~~~~~~~~
+
+Users with a `Proxmox Backup Server Basic, Standard or Premium Subscription Plan
+<https://www.proxmox.com/en/proxmox-backup-server/pricing>`_ have access to the
+Proxmox Customer Portal. The Customer Portal provides support with guaranteed
+response times from the Proxmox developers.
+For more information or for volume discounts, please contact office@proxmox.com.
 
 Community Support Forum
 ~~~~~~~~~~~~~~~~~~~~~~~

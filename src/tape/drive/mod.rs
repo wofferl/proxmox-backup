@@ -51,7 +51,10 @@ use crate::{
         VirtualTapeDrive,
         LinuxTapeDrive,
     },
-    server::WorkerTask,
+    server::{
+        send_load_media_email,
+        WorkerTask,
+    },
     tape::{
         TapeWrite,
         TapeRead,
@@ -66,7 +69,6 @@ use crate::{
         changer::{
             MediaChange,
             MtxMediaChanger,
-            send_load_media_email,
         },
     },
 };
@@ -84,6 +86,26 @@ pub trait TapeDriver {
     ///
     /// We assume this flushes the tape write buffer.
     fn move_to_eom(&mut self) -> Result<(), Error>;
+
+    /// Move to last file
+    fn move_to_last_file(&mut self) -> Result<(), Error> {
+
+        self.move_to_eom()?;
+
+        if self.current_file_number()? == 0 {
+            bail!("move_to_last_file failed - media contains no data");
+        }
+
+        self.backward_space_count_files(2)?;
+
+        Ok(())
+    }
+
+    /// Forward space count files. The tape is positioned on the first block of the next file.
+    fn forward_space_count_files(&mut self, count: usize) -> Result<(), Error>;
+
+    /// Backward space count files.  The tape is positioned on the last block of the previous file.
+    fn backward_space_count_files(&mut self, count: usize) -> Result<(), Error>;
 
     /// Current file number
     fn current_file_number(&mut self) -> Result<u64, Error>;
@@ -209,7 +231,7 @@ pub trait TapeDriver {
     /// Set or clear encryption key
     ///
     /// We use the media_set_uuid to XOR the secret key with the
-    /// uuid (first 16 bytes), so that each media set uses an uique
+    /// uuid (first 16 bytes), so that each media set uses an unique
     /// key for encryption.
     fn set_encryption(
         &mut self,
@@ -465,7 +487,7 @@ pub fn request_and_load_media(
     }
 }
 
-/// Aquires an exclusive lock for the tape device
+/// Acquires an exclusive lock for the tape device
 ///
 /// Basically calls lock_device_path() using the configured drive path.
 pub fn lock_tape_device(
@@ -539,7 +561,7 @@ fn tape_device_path(
 
 pub struct DeviceLockGuard(std::fs::File);
 
-// Aquires an exclusive lock on `device_path`
+// Acquires an exclusive lock on `device_path`
 //
 // Uses systemd escape_unit to compute a file name from `device_path`, the try
 // to lock `/var/lock/<name>`.

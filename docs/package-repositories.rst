@@ -69,10 +69,12 @@ Here, the output should be:
 
  f3f6c5a3a67baf38ad178e5ff1ee270c /etc/apt/trusted.gpg.d/proxmox-ve-release-6.x.gpg
 
+.. _sysadmin_package_repos_enterprise:
+
 `Proxmox Backup`_ Enterprise Repository
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-This will be the default, stable, and recommended repository. It is available for
+This is the stable, recommended repository. It is available for
 all `Proxmox Backup`_ subscription users. It contains the most stable packages,
 and is suitable for production use. The ``pbs-enterprise`` repository is
 enabled by default:

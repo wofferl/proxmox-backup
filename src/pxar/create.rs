@@ -752,10 +752,7 @@ fn get_metadata(fd: RawFd, stat: &FileStat, flags: Flags, fs_magic: i64) -> Resu
             flags: 0,
             uid: stat.st_uid,
             gid: stat.st_gid,
-            mtime: pxar::format::StatxTimestamp {
-                secs: stat.st_mtime,
-                nanos: stat.st_mtime_nsec as u32,
-            },
+            mtime: pxar::format::StatxTimestamp::new(stat.st_mtime, stat.st_mtime_nsec as u32),
         },
         ..Default::default()
     };
@@ -768,7 +765,7 @@ fn get_metadata(fd: RawFd, stat: &FileStat, flags: Flags, fs_magic: i64) -> Resu
 }
 
 fn get_fcaps(meta: &mut Metadata, fd: RawFd, flags: Flags) -> Result<(), Error> {
-    if flags.contains(Flags::WITH_FCAPS) {
+    if !flags.contains(Flags::WITH_FCAPS) {
         return Ok(());
     }
 
@@ -790,7 +787,7 @@ fn get_xattr_fcaps_acl(
     proc_path: &Path,
     flags: Flags,
 ) -> Result<(), Error> {
-    if flags.contains(Flags::WITH_XATTRS) {
+    if !flags.contains(Flags::WITH_XATTRS) {
         return Ok(());
     }
 
@@ -879,7 +876,7 @@ fn get_quota_project_id(
         return Ok(());
     }
 
-    if flags.contains(Flags::WITH_QUOTA_PROJID) {
+    if !flags.contains(Flags::WITH_QUOTA_PROJID) {
         return Ok(());
     }
 
@@ -914,7 +911,7 @@ fn get_quota_project_id(
 }
 
 fn get_acl(metadata: &mut Metadata, proc_path: &Path, flags: Flags) -> Result<(), Error> {
-    if flags.contains(Flags::WITH_ACL) {
+    if !flags.contains(Flags::WITH_ACL) {
         return Ok(());
     }
 
@@ -1009,6 +1006,7 @@ fn process_acl(
 
             metadata.acl.users = acl_user;
             metadata.acl.groups = acl_group;
+            metadata.acl.group_obj = acl_group_obj;
         }
         acl::ACL_TYPE_DEFAULT => {
             if user_obj_permissions != None
@@ -1028,12 +1026,10 @@ fn process_acl(
 
             metadata.acl.default_users = acl_user;
             metadata.acl.default_groups = acl_group;
+            metadata.acl.default = acl_default;
         }
         _ => bail!("Unexpected ACL type encountered"),
     }
-
-    metadata.acl.group_obj = acl_group_obj;
-    metadata.acl.default = acl_default;
 
     Ok(())
 }

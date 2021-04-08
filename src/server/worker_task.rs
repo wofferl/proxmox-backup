@@ -207,6 +207,8 @@ pub fn upid_read_status(upid: &UPID) -> Result<TaskState, Error> {
     let mut iter = last_line.splitn(2, ": ");
     if let Some(time_str) = iter.next() {
         if let Ok(endtime) = proxmox::tools::time::parse_rfc3339(time_str) {
+            // set the endtime even if we cannot parse the state
+            status = TaskState::Unknown { endtime };
             if let Some(rest) = iter.next().and_then(|rest| rest.strip_prefix("TASK ")) {
                 if let Ok(state) = TaskState::from_endtime_and_message(endtime, rest) {
                     status = state;
@@ -749,7 +751,7 @@ impl WorkerTask {
             match data.abort_listeners.pop() {
                 None => { break; },
                 Some(ch) => {
-                    let _ = ch.send(()); // ignore erros here
+                    let _ = ch.send(()); // ignore errors here
                 },
             }
         }

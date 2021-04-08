@@ -12,13 +12,12 @@ use hyper::client::Client;
 use hyper::Body;
 use pin_project::pin_project;
 use serde_json::Value;
-use tokio::io::{ReadBuf, AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::UnixStream;
 
 use crate::tools;
 use proxmox::api::error::HttpError;
 
-/// Port below 1024 is privileged, this is intentional so only root (on host) can connect
 pub const DEFAULT_VSOCK_PORT: u16 = 807;
 
 #[derive(Clone)]
@@ -86,7 +85,7 @@ impl tower_service::Service<Uri> for VsockConnector {
 
             Ok(connection)
         })
-        // unravel the thread JoinHandle to a useable future
+        // unravel the thread JoinHandle to a usable future
         .map(|res| match res {
             Ok(res) => res,
             Err(err) => Err(format_err!("thread join error on vsock connect: {}", err)),
@@ -138,43 +137,48 @@ pub struct VsockClient {
     client: Client<VsockConnector>,
     cid: i32,
     port: u16,
+    auth: Option<String>,
 }
 
 impl VsockClient {
-    pub fn new(cid: i32, port: u16) -> Self {
+    pub fn new(cid: i32, port: u16, auth: Option<String>) -> Self {
         let conn = VsockConnector {};
         let client = Client::builder().build::<_, Body>(conn);
-        Self { client, cid, port }
+        Self {
+            client,
+            cid,
+            port,
+            auth,
+        }
     }
 
     pub async fn get(&self, path: &str, data: Option<Value>) -> Result<Value, Error> {
-        let req = Self::request_builder(self.cid, self.port, "GET", path, data)?;
+        let req = self.request_builder("GET", path, data)?;
         self.api_request(req).await
     }
 
-    pub async fn post(&mut self, path: &str, data: Option<Value>) -> Result<Value, Error> {
-        let req = Self::request_builder(self.cid, self.port, "POST", path, data)?;
+    pub async fn post(&self, path: &str, data: Option<Value>) -> Result<Value, Error> {
+        let req = self.request_builder("POST", path, data)?;
         self.api_request(req).await
     }
 
     pub async fn download(
-        &mut self,
+        &self,
         path: &str,
         data: Option<Value>,
         output: &mut (dyn AsyncWrite + Send + Unpin),
     ) -> Result<(), Error> {
-        let req = Self::request_builder(self.cid, self.port, "GET", path, data)?;
+        let req = self.request_builder("GET", path, data)?;
 
         let client = self.client.clone();
 
-        let resp = client.request(req)
+        let resp = client
+            .request(req)
             .await
             .map_err(|_| format_err!("vsock download request timed out"))?;
         let status = resp.status();
         if !status.is_success() {
-            Self::api_response(resp)
-                .await
-                .map(|_| ())?
+            Self::api_response(resp).await.map(|_| ())?
         } else {
             resp.into_body()
                 .map_err(Error::from)
@@ -212,47 +216,43 @@ impl VsockClient {
             .await
     }
 
-    pub fn request_builder(
-        cid: i32,
-        port: u16,
+    fn request_builder(
+        &self,
         method: &str,
         path: &str,
         data: Option<Value>,
     ) -> Result<Request<Body>, Error> {
         let path = path.trim_matches('/');
-        let url: Uri = format!("vsock://{}:{}/{}", cid, port, path).parse()?;
+        let url: Uri = format!("vsock://{}:{}/{}", self.cid, self.port, path).parse()?;
+
+        let make_builder = |content_type: &str, url: &Uri| {
+            let mut builder = Request::builder()
+                .method(method)
+                .uri(url)
+                .header(hyper::header::CONTENT_TYPE, content_type);
+            if let Some(auth) = &self.auth {
+                builder = builder.header(hyper::header::AUTHORIZATION, auth);
+            }
+            builder
+        };
 
         if let Some(data) = data {
             if method == "POST" {
-                let request = Request::builder()
-                    .method(method)
-                    .uri(url)
-                    .header(hyper::header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(data.to_string()))?;
+                let builder = make_builder("application/json", &url);
+                let request = builder.body(Body::from(data.to_string()))?;
                 return Ok(request);
             } else {
                 let query = tools::json_object_to_query(data)?;
-                let url: Uri = format!("vsock://{}:{}/{}?{}", cid, port, path, query).parse()?;
-                let request = Request::builder()
-                    .method(method)
-                    .uri(url)
-                    .header(
-                        hyper::header::CONTENT_TYPE,
-                        "application/x-www-form-urlencoded",
-                    )
-                    .body(Body::empty())?;
+                let url: Uri =
+                    format!("vsock://{}:{}/{}?{}", self.cid, self.port, path, query).parse()?;
+                let builder = make_builder("application/x-www-form-urlencoded", &url);
+                let request = builder.body(Body::empty())?;
                 return Ok(request);
             }
         }
 
-        let request = Request::builder()
-            .method(method)
-            .uri(url)
-            .header(
-                hyper::header::CONTENT_TYPE,
-                "application/x-www-form-urlencoded",
-            )
-            .body(Body::empty())?;
+        let builder = make_builder("application/x-www-form-urlencoded", &url);
+        let request = builder.body(Body::empty())?;
 
         Ok(request)
     }

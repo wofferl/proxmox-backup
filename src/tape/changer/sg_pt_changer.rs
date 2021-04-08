@@ -28,6 +28,7 @@ use crate::{
         SENSE_KEY_UNIT_ATTENTION,
         SENSE_KEY_NOT_READY,
         InquiryInfo,
+        ScsiError,
         scsi_ascii_to_string,
         scsi_inquiry,
     },
@@ -103,7 +104,7 @@ fn execute_scsi_command<F: AsRawFd>(
                 if !retry {
                     bail!("{} failed: {}", error_prefix, err);
                 }
-                if let Some(ref sense) = err.sense {
+                if let ScsiError::Sense(ref sense) = err {
 
                     if sense.sense_key == SENSE_KEY_NO_SENSE ||
                         sense.sense_key == SENSE_KEY_RECOVERED_ERROR ||
@@ -246,7 +247,7 @@ pub fn unload(
     Ok(())
 }
 
-/// Tranfer medium from one storage slot to another
+/// Transfer medium from one storage slot to another
 pub fn transfer_medium<F: AsRawFd>(
     file: &mut F,
     from_slot: u64,
@@ -362,7 +363,7 @@ pub fn read_element_status<F: AsRawFd>(file: &mut F) -> Result<MtxStatus, Error>
         bail!("got wrong number of import/export elements");
     }
     if (setup.transfer_element_count as usize) != drives.len() {
-        bail!("got wrong number of tranfer elements");
+        bail!("got wrong number of transfer elements");
     }
 
     // create same virtual slot order as mtx(1)
@@ -428,7 +429,7 @@ struct SubHeader {
     element_type_code: u8,
     flags: u8,
     descriptor_length: u16,
-    reseved: u8,
+    reserved: u8,
     byte_count_of_descriptor_data_available: [u8;3],
 }
 

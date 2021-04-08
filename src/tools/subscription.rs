@@ -210,7 +210,7 @@ fn test_parse_register_response() -> Result<(), Error> {
     Ok(())
 }
 
-/// querys the up to date subscription status and parses the response
+/// queries the up to date subscription status and parses the response
 pub fn check_subscription(key: String, server_id: String) -> Result<SubscriptionInfo, Error> {
 
     let now = proxmox::tools::time::epoch_i64();
@@ -299,7 +299,7 @@ pub fn delete_subscription() -> Result<(), Error> {
     Ok(())
 }
 
-/// updates apt authenification for repo access
+/// updates apt authentication for repo access
 pub fn update_apt_auth(key: Option<String>, password: Option<String>) -> Result<(), Error> {
     let auth_conf = std::path::Path::new(APT_AUTH_FN);
     match (key, password) {
@@ -318,8 +318,11 @@ pub fn update_apt_auth(key: Option<String>, password: Option<String>) -> Result<
             replace_file(auth_conf, conf.as_bytes(), file_opts)
                 .map_err(|e| format_err!("Error saving apt auth config - {}", e))?;
         }
-        _ => nix::unistd::unlink(auth_conf)
-            .map_err(|e| format_err!("Error clearing apt auth config - {}", e))?,
+        _ => match nix::unistd::unlink(auth_conf) {
+            Ok(()) => Ok(()),
+            Err(nix::Error::Sys(nix::errno::Errno::ENOENT)) => Ok(()), // ignore not existing
+            Err(err) => Err(err),
+        }.map_err(|e| format_err!("Error clearing apt auth config - {}", e))?,
     }
     Ok(())
 }

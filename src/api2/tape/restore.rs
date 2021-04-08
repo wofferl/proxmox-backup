@@ -1,6 +1,9 @@
 use std::path::Path;
 use std::ffi::OsStr;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
+use std::io::{Seek, SeekFrom};
+use std::sync::Arc;
 
 use anyhow::{bail, format_err, Error};
 use serde_json::Value;
@@ -12,6 +15,7 @@ use proxmox::{
         RpcEnvironmentType,
         Router,
         Permission,
+        schema::parse_property_string,
         section_config::SectionConfigData,
     },
     tools::{
@@ -26,10 +30,12 @@ use proxmox::{
 
 use crate::{
     task_log,
+    task_warn,
     task::TaskState,
     tools::compute_file_csum,
     api2::types::{
-        DATASTORE_SCHEMA,
+        DATASTORE_MAP_ARRAY_SCHEMA,
+        DATASTORE_MAP_LIST_SCHEMA,
         DRIVE_NAME_SCHEMA,
         UPID_SCHEMA,
         Authid,
@@ -40,6 +46,7 @@ use crate::{
         cached_user_info::CachedUserInfo,
         acl::{
             PRIV_DATASTORE_BACKUP,
+            PRIV_DATASTORE_MODIFY,
             PRIV_TAPE_READ,
         },
     },
@@ -64,17 +71,24 @@ use crate::{
         TAPE_STATUS_DIR,
         TapeRead,
         MediaId,
+        MediaSet,
         MediaCatalog,
-        MediaPool,
         Inventory,
+        lock_media_set,
         file_formats::{
             PROXMOX_BACKUP_MEDIA_LABEL_MAGIC_1_0,
             PROXMOX_BACKUP_SNAPSHOT_ARCHIVE_MAGIC_1_0,
+            PROXMOX_BACKUP_SNAPSHOT_ARCHIVE_MAGIC_1_1,
             PROXMOX_BACKUP_MEDIA_SET_LABEL_MAGIC_1_0,
             PROXMOX_BACKUP_CONTENT_HEADER_MAGIC_1_0,
             PROXMOX_BACKUP_CHUNK_ARCHIVE_MAGIC_1_0,
+            PROXMOX_BACKUP_CHUNK_ARCHIVE_MAGIC_1_1,
+            PROXMOX_BACKUP_CATALOG_ARCHIVE_MAGIC_1_0,
             MediaContentHeader,
+            ChunkArchiveHeader,
             ChunkArchiveDecoder,
+            SnapshotArchiveHeader,
+            CatalogArchiveHeader,
         },
         drive::{
             TapeDriver,
@@ -85,14 +99,75 @@ use crate::{
     },
 };
 
-pub const ROUTER: Router = Router::new()
-    .post(&API_METHOD_RESTORE);
+pub struct DataStoreMap {
+    map: HashMap<String, Arc<DataStore>>,
+    default: Option<Arc<DataStore>>,
+}
+
+impl TryFrom<String> for DataStoreMap {
+    type Error = Error;
+
+    fn try_from(value: String) -> Result<Self, Error> {
+        let value = parse_property_string(&value, &DATASTORE_MAP_ARRAY_SCHEMA)?;
+        let mut mapping: Vec<String> = value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+
+        let mut map = HashMap::new();
+        let mut default = None;
+        while let Some(mut store) = mapping.pop() {
+            if let Some(index) = store.find('=') {
+                let mut target = store.split_off(index);
+                target.remove(0); // remove '='
+                let datastore = DataStore::lookup_datastore(&target)?;
+                map.insert(store, datastore);
+            } else if default.is_none() {
+                default = Some(DataStore::lookup_datastore(&store)?);
+            } else {
+                bail!("multiple default stores given");
+            }
+        }
+
+        Ok(Self { map, default })
+    }
+}
+
+impl DataStoreMap {
+    fn used_datastores<'a>(&self) -> HashSet<&str> {
+        let mut set = HashSet::new();
+        for store in self.map.values() {
+            set.insert(store.name());
+        }
+
+        if let Some(ref store) = self.default {
+            set.insert(store.name());
+        }
+
+        set
+    }
+
+    fn get_datastore(&self, source: &str) -> Option<&DataStore> {
+        if let Some(store) = self.map.get(source) {
+            return Some(&store);
+        }
+        if let Some(ref store) = self.default {
+            return Some(&store);
+        }
+
+        return None;
+    }
+}
+
+pub const ROUTER: Router = Router::new().post(&API_METHOD_RESTORE);
 
 #[api(
    input: {
         properties: {
             store: {
-                schema: DATASTORE_SCHEMA,
+                schema: DATASTORE_MAP_LIST_SCHEMA,
             },
             drive: {
                 schema: DRIVE_NAME_SCHEMA,
@@ -103,6 +178,10 @@ pub const ROUTER: Router = Router::new()
             },
             "notify-user": {
                 type: Userid,
+                optional: true,
+            },
+            owner: {
+                type: Authid,
                 optional: true,
             },
         },
@@ -123,15 +202,34 @@ pub fn restore(
     drive: String,
     media_set: String,
     notify_user: Option<Userid>,
+    owner: Option<Authid>,
     rpcenv: &mut dyn RpcEnvironment,
 ) -> Result<Value, Error> {
-
     let auth_id: Authid = rpcenv.get_auth_id().unwrap().parse()?;
     let user_info = CachedUserInfo::new()?;
 
-    let privs = user_info.lookup_privs(&auth_id, &["datastore", &store]);
-    if (privs & PRIV_DATASTORE_BACKUP) == 0 {
-        bail!("no permissions on /datastore/{}", store);
+    let store_map = DataStoreMap::try_from(store)
+        .map_err(|err| format_err!("cannot parse store mapping: {}", err))?;
+    let used_datastores = store_map.used_datastores();
+    if used_datastores.len() == 0 {
+        bail!("no datastores given");
+    }
+
+    for store in used_datastores.iter() {
+        let privs = user_info.lookup_privs(&auth_id, &["datastore", &store]);
+        if (privs & PRIV_DATASTORE_BACKUP) == 0 {
+            bail!("no permissions on /datastore/{}", store);
+        }
+
+        if let Some(ref owner) = owner {
+            let correct_owner = owner == &auth_id
+                || (owner.is_token() && !auth_id.is_token() && owner.user() == auth_id.user());
+
+            // same permission as changing ownership after syncing
+            if !correct_owner && privs & PRIV_DATASTORE_MODIFY == 0 {
+                bail!("no permission to restore as '{}'", owner);
+            }
+        }
     }
 
     let privs = user_info.lookup_privs(&auth_id, &["tape", "drive", &drive]);
@@ -139,10 +237,13 @@ pub fn restore(
         bail!("no permissions on /tape/drive/{}", drive);
     }
 
-    let status_path = Path::new(TAPE_STATUS_DIR);
-    let inventory = Inventory::load(status_path)?;
-
     let media_set_uuid = media_set.parse()?;
+
+    let status_path = Path::new(TAPE_STATUS_DIR);
+
+    let _lock = lock_media_set(status_path, &media_set_uuid, None)?;
+
+    let inventory = Inventory::load(status_path)?;
 
     let pool = inventory.lookup_media_set_pool(&media_set_uuid)?;
 
@@ -151,8 +252,6 @@ pub fn restore(
         bail!("no permissions on /tape/pool/{}", pool);
     }
 
-    let datastore = DataStore::lookup_datastore(&store)?;
-
     let (drive_config, _digest) = config::drive::config()?;
 
     // early check/lock before starting worker
@@ -160,17 +259,20 @@ pub fn restore(
 
     let to_stdout = rpcenv.env_type() == RpcEnvironmentType::CLI;
 
+    let taskid = used_datastores
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<String>>()
+        .join(", ");
     let upid_str = WorkerTask::new_thread(
         "tape-restore",
-        Some(store.clone()),
+        Some(taskid),
         auth_id.clone(),
         to_stdout,
         move |worker| {
             let _drive_lock = drive_lock; // keep lock guard
 
             set_tape_device_state(&drive, &worker.upid().to_string())?;
-
-            let _lock = MediaPool::lock(status_path, &pool)?;
 
             let members = inventory.compute_media_set_members(&media_set_uuid)?;
 
@@ -202,7 +304,11 @@ pub fn restore(
                 task_log!(worker, "Encryption key fingerprint: {}", fingerprint);
             }
             task_log!(worker, "Pool: {}", pool);
-            task_log!(worker, "Datastore: {}", store);
+            task_log!(worker, "Datastore(s):");
+            store_map
+                .used_datastores()
+                .iter()
+                .for_each(|store| task_log!(worker, "\t{}", store));
             task_log!(worker, "Drive: {}", drive);
             task_log!(
                 worker,
@@ -219,9 +325,10 @@ pub fn restore(
                     media_id,
                     &drive_config,
                     &drive,
-                    &datastore,
+                    &store_map,
                     &auth_id,
                     &notify_user,
+                    &owner,
                 )?;
             }
 
@@ -249,11 +356,11 @@ pub fn request_and_restore_media(
     media_id: &MediaId,
     drive_config: &SectionConfigData,
     drive_name: &str,
-    datastore: &DataStore,
+    store_map: &DataStoreMap,
     authid: &Authid,
     notify_user: &Option<Userid>,
+    owner: &Option<Authid>,
 ) -> Result<(), Error> {
-
     let media_set_uuid = match media_id.media_set_label {
         None => bail!("restore_media: no media set - internal error"),
         Some(ref set) => &set.uuid,
@@ -284,7 +391,15 @@ pub fn request_and_restore_media(
         }
     }
 
-    restore_media(worker, &mut drive, &info, Some((datastore, authid)), false)
+    let restore_owner = owner.as_ref().unwrap_or(authid);
+
+    restore_media(
+        worker,
+        &mut drive,
+        &info,
+        Some((&store_map, restore_owner)),
+        false,
+    )
 }
 
 /// Restore complete media content and catalog
@@ -294,7 +409,7 @@ pub fn restore_media(
     worker: &WorkerTask,
     drive: &mut Box<dyn TapeDriver>,
     media_id: &MediaId,
-    target: Option<(&DataStore, &Authid)>,
+    target: Option<(&DataStoreMap, &Authid)>,
     verbose: bool,
 ) ->  Result<(), Error> {
 
@@ -323,11 +438,10 @@ fn restore_archive<'a>(
     worker: &WorkerTask,
     mut reader: Box<dyn 'a + TapeRead>,
     current_file_number: u64,
-    target: Option<(&DataStore, &Authid)>,
+    target: Option<(&DataStoreMap, &Authid)>,
     catalog: &mut MediaCatalog,
     verbose: bool,
 ) -> Result<(), Error> {
-
     let header: MediaContentHeader = unsafe { reader.read_le_value()? };
     if header.magic != PROXMOX_BACKUP_CONTENT_HEADER_MAGIC_1_0 {
         bail!("missing MediaContentHeader");
@@ -340,67 +454,123 @@ fn restore_archive<'a>(
             bail!("unexpected content magic (label)");
         }
         PROXMOX_BACKUP_SNAPSHOT_ARCHIVE_MAGIC_1_0 => {
-            let snapshot = reader.read_exact_allocated(header.size as usize)?;
-            let snapshot = std::str::from_utf8(&snapshot)
-                .map_err(|_| format_err!("found snapshot archive with non-utf8 characters in name"))?;
-            task_log!(worker, "Found snapshot archive: {} {}", current_file_number, snapshot);
+            bail!("unexpected snapshot archive version (v1.0)");
+        }
+        PROXMOX_BACKUP_SNAPSHOT_ARCHIVE_MAGIC_1_1 => {
+            let header_data = reader.read_exact_allocated(header.size as usize)?;
+
+            let archive_header: SnapshotArchiveHeader = serde_json::from_slice(&header_data)
+                .map_err(|err| format_err!("unable to parse snapshot archive header - {}", err))?;
+
+            let datastore_name = archive_header.store;
+            let snapshot = archive_header.snapshot;
+
+            task_log!(worker, "File {}: snapshot archive {}:{}", current_file_number, datastore_name, snapshot);
 
             let backup_dir: BackupDir = snapshot.parse()?;
 
-            if let Some((datastore, authid)) = target.as_ref() {
-
-                let (owner, _group_lock) = datastore.create_locked_backup_group(backup_dir.group(), authid)?;
-                if *authid != &owner { // only the owner is allowed to create additional snapshots
-                    bail!("restore '{}' failed - owner check failed ({} != {})", snapshot, authid, owner);
-                }
-
-                let (rel_path, is_new, _snap_lock) = datastore.create_locked_backup_dir(&backup_dir)?;
-                let mut path = datastore.base_path();
-                path.push(rel_path);
-
-                if is_new {
-                    task_log!(worker, "restore snapshot {}", backup_dir);
-
-                    match restore_snapshot_archive(worker, reader, &path) {
-                        Err(err) => {
-                            std::fs::remove_dir_all(&path)?;
-                            bail!("restore snapshot {} failed - {}", backup_dir, err);
-                        }
-                        Ok(false) => {
-                            std::fs::remove_dir_all(&path)?;
-                            task_log!(worker, "skip incomplete snapshot {}", backup_dir);
-                        }
-                        Ok(true) => {
-                            catalog.register_snapshot(Uuid::from(header.uuid), current_file_number, snapshot)?;
-                            catalog.commit_if_large()?;
-                        }
+            if let Some((store_map, authid)) = target.as_ref() {
+                if let Some(datastore) = store_map.get_datastore(&datastore_name) {
+                    let (owner, _group_lock) =
+                        datastore.create_locked_backup_group(backup_dir.group(), authid)?;
+                    if *authid != &owner {
+                        // only the owner is allowed to create additional snapshots
+                        bail!(
+                            "restore '{}' failed - owner check failed ({} != {})",
+                            snapshot,
+                            authid,
+                            owner
+                        );
                     }
-                    return Ok(());
+
+                    let (rel_path, is_new, _snap_lock) =
+                        datastore.create_locked_backup_dir(&backup_dir)?;
+                    let mut path = datastore.base_path();
+                    path.push(rel_path);
+
+                    if is_new {
+                        task_log!(worker, "restore snapshot {}", backup_dir);
+
+                        match restore_snapshot_archive(worker, reader, &path) {
+                            Err(err) => {
+                                std::fs::remove_dir_all(&path)?;
+                                bail!("restore snapshot {} failed - {}", backup_dir, err);
+                            }
+                            Ok(false) => {
+                                std::fs::remove_dir_all(&path)?;
+                                task_log!(worker, "skip incomplete snapshot {}", backup_dir);
+                            }
+                            Ok(true) => {
+                                catalog.register_snapshot(
+                                    Uuid::from(header.uuid),
+                                    current_file_number,
+                                    &datastore_name,
+                                    &snapshot,
+                                )?;
+                                catalog.commit_if_large()?;
+                            }
+                        }
+                        return Ok(());
+                    }
+                } else {
+                    task_log!(worker, "skipping...");
                 }
             }
 
             reader.skip_to_end()?; // read all data
             if let Ok(false) = reader.is_incomplete() {
-                catalog.register_snapshot(Uuid::from(header.uuid), current_file_number, snapshot)?;
+                catalog.register_snapshot(Uuid::from(header.uuid), current_file_number, &datastore_name, &snapshot)?;
                 catalog.commit_if_large()?;
             }
         }
         PROXMOX_BACKUP_CHUNK_ARCHIVE_MAGIC_1_0 => {
-
-            task_log!(worker, "Found chunk archive: {}", current_file_number);
-            let datastore = target.as_ref().map(|t| t.0);
-
-            if let Some(chunks) = restore_chunk_archive(worker, reader, datastore, verbose)? {
-                catalog.start_chunk_archive(Uuid::from(header.uuid), current_file_number)?;
-                for digest in chunks.iter() {
-                    catalog.register_chunk(&digest)?;
-                }
-                task_log!(worker, "register {} chunks", chunks.len());
-                catalog.end_chunk_archive()?;
-                catalog.commit_if_large()?;
-            }
+            bail!("unexpected chunk archive version (v1.0)");
         }
-        _ =>  bail!("unknown content magic {:?}", header.content_magic),
+        PROXMOX_BACKUP_CHUNK_ARCHIVE_MAGIC_1_1 => {
+            let header_data = reader.read_exact_allocated(header.size as usize)?;
+
+            let archive_header: ChunkArchiveHeader = serde_json::from_slice(&header_data)
+                .map_err(|err| format_err!("unable to parse chunk archive header - {}", err))?;
+
+            let source_datastore = archive_header.store;
+
+            task_log!(worker, "File {}: chunk archive for datastore '{}'", current_file_number, source_datastore);
+            let datastore = target
+                .as_ref()
+                .and_then(|t| t.0.get_datastore(&source_datastore));
+
+            if datastore.is_some() || target.is_none() {
+                if let Some(chunks) = restore_chunk_archive(worker, reader, datastore, verbose)? {
+                    catalog.start_chunk_archive(
+                        Uuid::from(header.uuid),
+                        current_file_number,
+                        &source_datastore,
+                    )?;
+                    for digest in chunks.iter() {
+                        catalog.register_chunk(&digest)?;
+                    }
+                    task_log!(worker, "register {} chunks", chunks.len());
+                    catalog.end_chunk_archive()?;
+                    catalog.commit_if_large()?;
+                }
+                return Ok(());
+            } else if target.is_some() {
+                task_log!(worker, "skipping...");
+            }
+
+            reader.skip_to_end()?; // read all data
+        }
+        PROXMOX_BACKUP_CATALOG_ARCHIVE_MAGIC_1_0 => {
+            let header_data = reader.read_exact_allocated(header.size as usize)?;
+
+            let archive_header: CatalogArchiveHeader = serde_json::from_slice(&header_data)
+                .map_err(|err| format_err!("unable to parse catalog archive header - {}", err))?;
+
+            task_log!(worker, "File {}: skip catalog '{}'", current_file_number, archive_header.uuid);
+
+            reader.skip_to_end()?; // read all data
+        }
+         _ =>  bail!("unknown content magic {:?}", header.content_magic),
     }
 
     catalog.commit()?;
@@ -616,4 +786,138 @@ fn try_restore_snapshot_archive<R: pxar::decoder::SeqRead>(
     }
 
     Ok(())
+}
+
+/// Try to restore media catalogs (form catalog_archives)
+pub fn fast_catalog_restore(
+    worker: &WorkerTask,
+    drive: &mut Box<dyn TapeDriver>,
+    media_set: &MediaSet,
+    uuid: &Uuid, // current media Uuid
+) ->  Result<bool, Error> {
+
+    let status_path = Path::new(TAPE_STATUS_DIR);
+
+    let current_file_number = drive.current_file_number()?;
+    if current_file_number != 2 {
+        bail!("fast_catalog_restore: wrong media position - internal error");
+    }
+
+    let mut found_catalog = false;
+
+    let mut moved_to_eom = false;
+
+    loop {
+        let current_file_number = drive.current_file_number()?;
+
+        { // limit reader scope
+            let mut reader = match drive.read_next_file()? {
+                None => {
+                    task_log!(worker, "detected EOT after {} files", current_file_number);
+                    break;
+                }
+                Some(reader) => reader,
+            };
+
+            let header: MediaContentHeader = unsafe { reader.read_le_value()? };
+            if header.magic != PROXMOX_BACKUP_CONTENT_HEADER_MAGIC_1_0 {
+                bail!("missing MediaContentHeader");
+            }
+
+            if header.content_magic == PROXMOX_BACKUP_CATALOG_ARCHIVE_MAGIC_1_0 {
+                task_log!(worker, "found catalog at pos {}", current_file_number);
+
+                let header_data = reader.read_exact_allocated(header.size as usize)?;
+
+                let archive_header: CatalogArchiveHeader = serde_json::from_slice(&header_data)
+                    .map_err(|err| format_err!("unable to parse catalog archive header - {}", err))?;
+
+                if &archive_header.media_set_uuid != media_set.uuid() {
+                    task_log!(worker, "skipping unrelated catalog at pos {}", current_file_number);
+                    reader.skip_to_end()?; // read all data
+                    continue;
+                }
+
+                let catalog_uuid = &archive_header.uuid;
+
+                let wanted = media_set
+                    .media_list()
+                    .iter()
+                    .find(|e| {
+                        match e {
+                            None => false,
+                            Some(uuid) => uuid == catalog_uuid,
+                        }
+                    })
+                    .is_some();
+
+                if !wanted {
+                    task_log!(worker, "skip catalog because media '{}' not inventarized", catalog_uuid);
+                    reader.skip_to_end()?; // read all data
+                    continue;
+                }
+
+                if catalog_uuid == uuid {
+                    // always restore and overwrite catalog
+                } else {
+                    // only restore if catalog does not exist
+                    if MediaCatalog::exists(status_path, catalog_uuid) {
+                        task_log!(worker, "catalog for media '{}' already exists", catalog_uuid);
+                        reader.skip_to_end()?; // read all data
+                        continue;
+                    }
+                }
+
+                let mut file = MediaCatalog::create_temporary_database_file(status_path, catalog_uuid)?;
+
+                std::io::copy(&mut reader, &mut file)?;
+
+                file.seek(SeekFrom::Start(0))?;
+
+                match MediaCatalog::parse_catalog_header(&mut file)? {
+                    (true, Some(media_uuid), Some(media_set_uuid)) => {
+                        if &media_uuid != catalog_uuid {
+                            task_log!(worker, "catalog uuid missmatch at pos {}", current_file_number);
+                            continue;
+                        }
+                        if media_set_uuid != archive_header.media_set_uuid {
+                            task_log!(worker, "catalog media_set missmatch at pos {}", current_file_number);
+                            continue;
+                        }
+
+                        MediaCatalog::finish_temporary_database(status_path, &media_uuid, true)?;
+
+                        if catalog_uuid == uuid {
+                            task_log!(worker, "successfully restored catalog");
+                            found_catalog = true
+                        } else {
+                            task_log!(worker, "successfully restored related catalog {}", media_uuid);
+                        }
+                    }
+                    _ => {
+                        task_warn!(worker, "got incomplete catalog header - skip file");
+                        continue;
+                    }
+                }
+
+                continue;
+            }
+        }
+
+        if moved_to_eom {
+            break; // already done - stop
+        }
+        moved_to_eom = true;
+
+        task_log!(worker, "searching for catalog at EOT (moving to EOT)");
+        drive.move_to_last_file()?;
+
+        let new_file_number = drive.current_file_number()?;
+
+        if new_file_number < (current_file_number + 1) {
+            break; // no new content - stop
+        }
+    }
+
+    Ok(found_catalog)
 }

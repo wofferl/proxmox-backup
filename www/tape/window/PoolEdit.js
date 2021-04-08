@@ -3,6 +3,8 @@ Ext.define('PBS.TapeManagement.PoolEditWindow', {
     alias: 'widget.pbsPoolEditWindow',
     mixins: ['Proxmox.Mixin.CBind'],
 
+    onlineHelp: 'tape_media_pool_config',
+
     isCreate: true,
     isAdd: true,
     subject: gettext('Media Pool'),
@@ -33,7 +35,7 @@ Ext.define('PBS.TapeManagement.PoolEditWindow', {
 		},
 	    },
 	    {
-		fieldLabel: gettext('Allocation'),
+		fieldLabel: gettext('Allocation Policy'),
 		xtype: 'pbsAllocationSelector',
 		name: 'allocation',
 		skipEmptyText: true,
@@ -44,7 +46,7 @@ Ext.define('PBS.TapeManagement.PoolEditWindow', {
 		},
 	    },
 	    {
-		fieldLabel: gettext('Retention'),
+		fieldLabel: gettext('Retention Policy'),
 		xtype: 'pbsRetentionSelector',
 		name: 'retention',
 		skipEmptyText: true,

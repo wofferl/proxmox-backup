@@ -99,6 +99,8 @@ const_regex!{
     pub ZPOOL_NAME_REGEX = r"^[a-zA-Z][a-z0-9A-Z\-_.:]+$";
 
     pub UUID_REGEX = r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$";
+
+    pub DATASTORE_MAP_REGEX = concat!(r"(:?", PROXMOX_SAFE_ID_REGEX_STR!(), r"=)?", PROXMOX_SAFE_ID_REGEX_STR!());
 }
 
 pub const SYSTEMD_DATETIME_FORMAT: ApiStringFormat =
@@ -163,6 +165,9 @@ pub const SUBSCRIPTION_KEY_FORMAT: ApiStringFormat =
 
 pub const BLOCKDEVICE_NAME_FORMAT: ApiStringFormat =
     ApiStringFormat::Pattern(&BLOCKDEVICE_NAME_REGEX);
+
+pub const DATASTORE_MAP_FORMAT: ApiStringFormat =
+    ApiStringFormat::Pattern(&DATASTORE_MAP_REGEX);
 
 pub const PASSWORD_SCHEMA: Schema = StringSchema::new("Password.")
     .format(&PASSWORD_FORMAT)
@@ -354,6 +359,25 @@ pub const DATASTORE_SCHEMA: Schema = StringSchema::new("Datastore name.")
     .format(&PROXMOX_SAFE_ID_FORMAT)
     .min_length(3)
     .max_length(32)
+    .schema();
+
+pub const DATASTORE_MAP_SCHEMA: Schema = StringSchema::new("Datastore mapping.")
+    .format(&DATASTORE_MAP_FORMAT)
+    .min_length(3)
+    .max_length(65)
+    .type_text("(<source>=)?<target>")
+    .schema();
+
+pub const DATASTORE_MAP_ARRAY_SCHEMA: Schema = ArraySchema::new(
+    "Datastore mapping list.", &DATASTORE_MAP_SCHEMA)
+    .schema();
+
+pub const DATASTORE_MAP_LIST_SCHEMA: Schema = StringSchema::new(
+    "A list of Datastore mappings (or single datastore), comma separated. \
+    For example 'a=b,e' maps the source datastore 'a' to target 'b and \
+    all other sources to the default 'e'. If no default is given, only the \
+    specified sources are mapped.")
+    .format(&ApiStringFormat::PropertyString(&DATASTORE_MAP_ARRAY_SCHEMA))
     .schema();
 
 pub const MEDIA_SET_UUID_SCHEMA: Schema =
@@ -1272,7 +1296,7 @@ pub struct APTUpdateInfo {
 pub enum Notify {
     /// Never send notification
     Never,
-    /// Send notifications for failed and sucessful jobs
+    /// Send notifications for failed and successful jobs
     Always,
     /// Send notifications for failed jobs only
     Error,

@@ -27,10 +27,13 @@ use proxmox_backup::{
     api2::{
         self,
         types::{
+            Authid,
             DATASTORE_SCHEMA,
+            DATASTORE_MAP_LIST_SCHEMA,
             DRIVE_NAME_SCHEMA,
             MEDIA_LABEL_SCHEMA,
             MEDIA_POOL_NAME_SCHEMA,
+            Userid,
         },
     },
     config::{
@@ -781,8 +784,8 @@ async fn clean_drive(mut param: Value) -> Result<(), Error> {
 
     let mut client = connect_to_localhost()?;
 
-    let path = format!("api2/json/tape/drive/{}/clean-drive", drive);
-    let result = client.post(&path, Some(param)).await?;
+    let path = format!("api2/json/tape/drive/{}/clean", drive);
+    let result = client.put(&path, Some(param)).await?;
 
     view_task_result(&mut client, result, &output_format).await?;
 
@@ -853,7 +856,7 @@ async fn backup(mut param: Value) -> Result<(), Error> {
    input: {
         properties: {
             store: {
-                schema: DATASTORE_SCHEMA,
+                schema: DATASTORE_MAP_LIST_SCHEMA,
             },
             drive: {
                 schema: DRIVE_NAME_SCHEMA,
@@ -862,6 +865,14 @@ async fn backup(mut param: Value) -> Result<(), Error> {
             "media-set": {
                 description: "Media set UUID.",
                 type: String,
+            },
+            "notify-user": {
+                type: Userid,
+                optional: true,
+            },
+            owner: {
+                type: Authid,
+                optional: true,
             },
             "output-format": {
                 schema: OUTPUT_FORMAT,
@@ -897,6 +908,11 @@ async fn restore(mut param: Value) -> Result<(), Error> {
             },
             force: {
                 description: "Force overriding existing index.",
+                type: bool,
+                optional: true,
+            },
+            scan: {
+                description: "Re-read the whole tape to reconstruct the catalog instead of restoring saved versions.",
                 type: bool,
                 optional: true,
             },

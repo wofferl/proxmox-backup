@@ -1,10 +1,11 @@
 use anyhow::Error;
 use serde_json::json;
 
-use handlebars::{Handlebars, Helper, Context, RenderError, RenderContext, Output, HelperResult};
+use handlebars::{Handlebars, Helper, Context, RenderError, RenderContext, Output, HelperResult, TemplateError};
 
 use proxmox::tools::email::sendmail;
 use proxmox::api::schema::parse_property_string;
+use proxmox::try_block;
 
 use crate::{
     config::datastore::DataStoreConfig,
@@ -43,7 +44,7 @@ Deduplication Factor: {{deduplication-factor}}
 Garbage collection successful.
 
 
-Please visit the web interface for futher details:
+Please visit the web interface for further details:
 
 <https://{{fqdn}}:{{port}}/#DataStore-{{datastore}}>
 
@@ -57,7 +58,7 @@ Datastore: {{datastore}}
 Garbage collection failed: {{error}}
 
 
-Please visit the web interface for futher details:
+Please visit the web interface for further details:
 
 <https://{{fqdn}}:{{port}}/#pbsServerAdministration:tasks>
 
@@ -71,7 +72,7 @@ Datastore: {{job.store}}
 Verification successful.
 
 
-Please visit the web interface for futher details:
+Please visit the web interface for further details:
 
 <https://{{fqdn}}:{{port}}/#DataStore-{{job.store}}>
 
@@ -89,7 +90,7 @@ Verification failed on these snapshots/groups:
 {{/each}}
 
 
-Please visit the web interface for futher details:
+Please visit the web interface for further details:
 
 <https://{{fqdn}}:{{port}}/#pbsServerAdministration:tasks>
 
@@ -105,7 +106,7 @@ Remote Store: {{job.remote-store}}
 Synchronization successful.
 
 
-Please visit the web interface for futher details:
+Please visit the web interface for further details:
 
 <https://{{fqdn}}:{{port}}/#DataStore-{{job.store}}>
 
@@ -121,7 +122,7 @@ Remote Store: {{job.remote-store}}
 Synchronization failed: {{error}}
 
 
-Please visit the web interface for futher details:
+Please visit the web interface for further details:
 
 <https://{{fqdn}}:{{port}}/#pbsServerAdministration:tasks>
 
@@ -148,11 +149,19 @@ Datastore:  {{job.store}}
 Tape Pool:  {{job.pool}}
 Tape Drive: {{job.drive}}
 
+{{#if snapshot-list ~}}
+Snapshots included:
+
+{{#each snapshot-list~}}
+{{this}}
+{{/each~}}
+{{/if}}
+Duration: {{duration}}
 
 Tape Backup successful.
 
 
-Please visit the web interface for futher details:
+Please visit the web interface for further details:
 
 <https://{{fqdn}}:{{port}}/#DataStore-{{job.store}}>
 
@@ -171,7 +180,7 @@ Tape Drive: {{job.drive}}
 Tape Backup failed: {{error}}
 
 
-Please visit the web interface for futher details:
+Please visit the web interface for further details:
 
 <https://{{fqdn}}:{{port}}/#pbsServerAdministration:tasks>
 
@@ -181,28 +190,46 @@ lazy_static::lazy_static!{
 
     static ref HANDLEBARS: Handlebars<'static> = {
         let mut hb = Handlebars::new();
+        let result: Result<(), TemplateError> = try_block!({
 
-        hb.set_strict_mode(true);
+            hb.set_strict_mode(true);
+            hb.register_escape_fn(handlebars::no_escape);
 
-        hb.register_helper("human-bytes", Box::new(handlebars_humam_bytes_helper));
-        hb.register_helper("relative-percentage", Box::new(handlebars_relative_percentage_helper));
+            hb.register_helper("human-bytes", Box::new(handlebars_humam_bytes_helper));
+            hb.register_helper("relative-percentage", Box::new(handlebars_relative_percentage_helper));
 
-        hb.register_template_string("gc_ok_template", GC_OK_TEMPLATE).unwrap();
-        hb.register_template_string("gc_err_template", GC_ERR_TEMPLATE).unwrap();
+            hb.register_template_string("gc_ok_template", GC_OK_TEMPLATE)?;
+            hb.register_template_string("gc_err_template", GC_ERR_TEMPLATE)?;
 
-        hb.register_template_string("verify_ok_template", VERIFY_OK_TEMPLATE).unwrap();
-        hb.register_template_string("verify_err_template", VERIFY_ERR_TEMPLATE).unwrap();
+            hb.register_template_string("verify_ok_template", VERIFY_OK_TEMPLATE)?;
+            hb.register_template_string("verify_err_template", VERIFY_ERR_TEMPLATE)?;
 
-        hb.register_template_string("sync_ok_template", SYNC_OK_TEMPLATE).unwrap();
-        hb.register_template_string("sync_err_template", SYNC_ERR_TEMPLATE).unwrap();
+            hb.register_template_string("sync_ok_template", SYNC_OK_TEMPLATE)?;
+            hb.register_template_string("sync_err_template", SYNC_ERR_TEMPLATE)?;
 
-        hb.register_template_string("tape_backup_ok_template", TAPE_BACKUP_OK_TEMPLATE).unwrap();
-        hb.register_template_string("tape_backup_err_template", TAPE_BACKUP_ERR_TEMPLATE).unwrap();
+            hb.register_template_string("tape_backup_ok_template", TAPE_BACKUP_OK_TEMPLATE)?;
+            hb.register_template_string("tape_backup_err_template", TAPE_BACKUP_ERR_TEMPLATE)?;
 
-        hb.register_template_string("package_update_template", PACKAGE_UPDATES_TEMPLATE).unwrap();
+            hb.register_template_string("package_update_template", PACKAGE_UPDATES_TEMPLATE)?;
+
+            Ok(())
+        });
+
+        if let Err(err) = result {
+            eprintln!("error during template registration: {}", err);
+        }
 
         hb
     };
+}
+
+/// Summary of a successful Tape Job
+#[derive(Default)]
+pub struct TapeBackupJobSummary {
+    /// The list of snaphots backed up
+    pub snapshot_list: Vec<String>,
+    /// The total time of the backup job
+    pub duration: std::time::Duration,
 }
 
 fn send_job_status_mail(
@@ -402,14 +429,18 @@ pub fn send_tape_backup_status(
     id: Option<&str>,
     job: &TapeBackupJobSetup,
     result: &Result<(), Error>,
+    summary: TapeBackupJobSummary,
 ) -> Result<(), Error> {
 
     let (fqdn, port) = get_server_url();
+    let duration: crate::tools::systemd::time::TimeSpan = summary.duration.into();
     let mut data = json!({
         "job": job,
         "fqdn": fqdn,
         "port": port,
         "id": id,
+        "snapshot-list": summary.snapshot_list,
+        "duration": duration.to_string(),
     });
 
     let text = match result {
@@ -446,6 +477,30 @@ pub fn send_tape_backup_status(
     send_job_status_mail(email, &subject, &text)?;
 
     Ok(())
+}
+
+/// Send email to a person to request a manual media change
+pub fn send_load_media_email(
+    drive: &str,
+    label_text: &str,
+    to: &str,
+    reason: Option<String>,
+) -> Result<(), Error> {
+
+    let subject = format!("Load Media '{}' request for drive '{}'", label_text, drive);
+
+    let mut text = String::new();
+
+    if let Some(reason) = reason {
+        text.push_str(&format!("The drive has the wrong or no tape inserted. Error:\n{}\n\n", reason));
+    }
+
+    text.push_str("Please insert the requested media into the backup drive.\n\n");
+
+    text.push_str(&format!("Drive: {}\n", drive));
+    text.push_str(&format!("Media: {}\n", label_text));
+
+    send_job_status_mail(to, &subject, &text)
 }
 
 fn get_server_url() -> (String, usize) {
@@ -575,4 +630,24 @@ fn handlebars_relative_percentage_helper(
         out.write(&format!("{:.2}%", (param0*100.0)/param1))?;
     }
     Ok(())
+}
+
+#[test]
+fn test_template_register() {
+    HANDLEBARS.get_helper("human-bytes").unwrap();
+    HANDLEBARS.get_helper("relative-percentage").unwrap();
+
+    assert!(HANDLEBARS.has_template("gc_ok_template"));
+    assert!(HANDLEBARS.has_template("gc_err_template"));
+
+    assert!(HANDLEBARS.has_template("verify_ok_template"));
+    assert!(HANDLEBARS.has_template("verify_err_template"));
+
+    assert!(HANDLEBARS.has_template("sync_ok_template"));
+    assert!(HANDLEBARS.has_template("sync_err_template"));
+
+    assert!(HANDLEBARS.has_template("tape_backup_ok_template"));
+    assert!(HANDLEBARS.has_template("tape_backup_err_template"));
+
+    assert!(HANDLEBARS.has_template("package_update_template"));
 }

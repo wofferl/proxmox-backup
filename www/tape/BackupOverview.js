@@ -24,11 +24,18 @@ Ext.define('PBS.TapeManagement.BackupOverview', {
 		return;
 	    }
 
-	    let mediaset = selection[0].data.text;
-	    let uuid = selection[0].data['media-set-uuid'];
+	    let node = selection[0];
+	    let mediaset = node.data.text;
+	    let uuid = node.data['media-set-uuid'];
+	    let datastores = node.data.datastores;
+	    while (!datastores && node.get('depth') > 2) {
+		node = node.parentNode;
+		datastores = node.data.datastores;
+	    }
 	    Ext.create('PBS.TapeManagement.TapeRestoreWindow', {
 		mediaset,
 		uuid,
+		datastores,
 		listeners: {
 		    destroy: function() {
 			me.reload();
@@ -127,9 +134,16 @@ Ext.define('PBS.TapeManagement.BackupOverview', {
 		    },
 		});
 
-		list.result.data.sort((a, b) => a.snapshot.localeCompare(b.snapshot));
+		list.result.data.sort(function(a, b) {
+		    let storeRes = a.store.localeCompare(b.store);
+		    if (storeRes === 0) {
+			return a.snapshot.localeCompare(b.snapshot);
+		    } else {
+			return storeRes;
+		    }
+		});
 
-		let tapes = {};
+		let stores = {};
 
 		for (let entry of list.result.data) {
 		    entry.text = entry.snapshot;
@@ -140,9 +154,19 @@ Ext.define('PBS.TapeManagement.BackupOverview', {
 			entry.iconCls = `fa ${iconCls}`;
 		    }
 
+		    let store = entry.store;
 		    let tape = entry['label-text'];
-		    if (tapes[tape] === undefined) {
-			tapes[tape] = {
+		    if (stores[store] === undefined) {
+			stores[store] = {
+			    text: store,
+			    'media-set-uuid': entry['media-set-uuid'],
+			    iconCls: 'fa fa-database',
+			    tapes: {},
+			};
+		    }
+
+		    if (stores[store].tapes[tape] === undefined) {
+			stores[store].tapes[tape] = {
 			    text: tape,
 			    'media-set-uuid': entry['media-set-uuid'],
 			    'seq-nr': entry['seq-nr'],
@@ -153,7 +177,7 @@ Ext.define('PBS.TapeManagement.BackupOverview', {
 		    }
 		    let [type, group, _id] = PBS.Utils.parse_snapshot_id(entry.snapshot);
 
-		    let children = tapes[tape].children;
+		    let children = stores[store].tapes[tape].children;
 		    let text = `${type}/${group}`;
 		    if (children.length < 1 || children[children.length - 1].text !== text) {
 			children.push({
@@ -167,8 +191,14 @@ Ext.define('PBS.TapeManagement.BackupOverview', {
 		    children[children.length - 1].children.push(entry);
 		}
 
-		for (const tape of Object.values(tapes)) {
-		    node.appendChild(tape);
+		let storeList = Object.values(stores);
+		let storeNameList = Object.keys(stores);
+		let expand = storeList.length === 1;
+		for (const store of storeList) {
+		    store.children = Object.values(store.tapes);
+		    store.expanded = expand;
+		    delete store.tapes;
+		    node.appendChild(store);
 		}
 
 		if (list.result.data.length === 0) {
@@ -176,6 +206,7 @@ Ext.define('PBS.TapeManagement.BackupOverview', {
 		}
 
 		node.set('loaded', true);
+		node.set('datastores', storeNameList);
 		Proxmox.Utils.setErrorMask(view, false);
 		node.expand();
 	    } catch (error) {
