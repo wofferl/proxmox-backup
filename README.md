@@ -50,7 +50,7 @@ git -C proxmox checkout -b v0.11.0 1fce0ff41ddeb177f92874bf4e95a775cfd99c69
 git clone https://git.proxmox.com/git/proxmox-fuse.git
 git -C proxmox-fuse checkout -b 0.1.1 0e0966af8886c176d8decfe18cb7ead4db5a83a6
 git clone https://git.proxmox.com/git/pxar.git
-git -C pxar checkout -b 0.9.0 82608859c8f949f9f527eeb891b42897bc2675a0
+git -C pxar checkout -b 0.10.1 82608859c8f949f9f527eeb891b42897bc2675a0
 git clone https://git.proxmox.com/git/pathpatterns.git
 git -C pathpatterns checkout -b 0.1.2 916e41c50e75a718ab7b1b95dc770eed9cd7a403
 ```

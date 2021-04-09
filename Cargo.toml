@@ -54,7 +54,7 @@ pathpatterns = { path = "../pathpatterns" }
 proxmox = { path = "../proxmox/proxmox", features = [ "sortable-macro", "api-macro", "websocket" ] }
 #proxmox-fuse = "0.1.1"
 proxmox-fuse = { path = "../proxmox-fuse" }
-#pxar = { version = "0.9.0", features = [ "tokio-io" ] }
+#pxar = { version = "0.10.1", features = [ "tokio-io" ] }
 pxar = { path = "../pxar", features = [ "tokio-io" ] }
 regex = "1.2"
 rustyline = "7"
