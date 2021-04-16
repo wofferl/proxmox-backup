@@ -1,3 +1,68 @@
+rust-proxmox-backup (1.1.2-1) unstable; urgency=medium
+
+  * backup verify: always re-check if we can skip a chunk in the actual verify
+    loop.
+
+  * tape: do not try to backup unfinished backups
+
+ -- Proxmox Support Team <support@proxmox.com>  Thu, 15 Apr 2021 13:26:52 +0200
+
+rust-proxmox-backup (1.1.1-1) unstable; urgency=medium
+
+  * docs: include tape in table of contents
+
+  * docs: tape: improve definition-list format and add screenshots
+
+  * docs: reorder maintenance and network chapters after client-usage/tools
+    chapters
+
+  * ui: tape changer status: add Format button to drive grid
+
+  * backup/verify: improve speed on disks with slow random-IO (spinners) by
+    iterating over chunks sorted by inode
+
+ -- Proxmox Support Team <support@proxmox.com>  Wed, 14 Apr 2021 14:50:29 +0200
+
+rust-proxmox-backup (1.1.0-1) unstable; urgency=medium
+
+  * enable tape backup as technology preview by default
+
+  * tape: read drive status: clear deferred error or media changed events.
+
+  * tape: improve end-of-tape (EOT) error handling
+
+  * tape: cleanup media catalog on tape reuse
+
+  * zfs: re-use underlying pool wide IO stats for datasets
+
+  * api daemon: only log error from accepting new connections to avoid opening
+    to many file descriptors
+
+  * api/datastore: allow downloading the entire archive as ZIP archive, not
+    only sub-paths
+
+ -- Proxmox Support Team <support@proxmox.com>  Tue, 13 Apr 2021 14:42:18 +0200
+
+rust-proxmox-backup (1.0.14-1) unstable; urgency=medium
+
+  * server: compress API call response and static files if client accepts that
+
+  * compress generated ZIP archives with deflate
+
+  * tape: implement LTO userspace driver
+
+  * docs: mention new user space tape driver, adopt device path names
+
+  * tape: always clear encryption key after backup (for security reasons)
+
+  * ui: improve changer status view
+
+  * add proxmox-file-restore package, providing a central file-restore binary
+    with preparations for restoring files also from block level backups using
+    QEMU for a safe encapsulation.
+
+ -- Proxmox Support Team <support@proxmox.com>  Thu, 08 Apr 2021 16:35:11 +0200
+
 rust-proxmox-backup (1.0.13-1) unstable; urgency=medium
 
   * pxar: improve handling ACL entries on create and restore

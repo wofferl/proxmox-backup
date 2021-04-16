@@ -1,6 +1,6 @@
 [package]
 name = "proxmox-backup"
-version = "1.0.13"
+version = "1.1.2"
 authors = [
     "Dietmar Maurer <dietmar@proxmox.com>",
     "Dominik Csapak <d.csapak@proxmox.com>",
@@ -29,7 +29,10 @@ bitflags = "1.2.1"
 bytes = "1.0"
 crc32fast = "1"
 endian_trait = { version = "0.6", features = ["arrays"] }
+env_logger = "0.7"
+flate2 = "1.0"
 anyhow = "1.0"
+thiserror = "1.0"
 futures = "0.3"
 h2 = { version = "0.3", features = [ "stream" ] }
 handlebars = "3.0"
@@ -49,7 +52,7 @@ pin-utils = "0.1.0"
 pin-project = "1.0"
 #pathpatterns = "0.1.2"
 pathpatterns = { path = "../pathpatterns" }
-#proxmox = { version = "0.11.0", features = [ "sortable-macro", "api-macro", "websocket" ] }
+#proxmox = { version = "0.11.1", features = [ "sortable-macro", "api-macro", "websocket" ] }
 #proxmox = { git = "git://git.proxmox.com/git/proxmox", version = "0.1.2", features = [ "sortable-macro", "api-macro" ] }
 proxmox = { path = "../proxmox/proxmox", features = [ "sortable-macro", "api-macro", "websocket" ] }
 #proxmox-fuse = "0.1.1"
@@ -62,10 +65,10 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 siphasher = "0.3"
 syslog = "4.0"
-tokio = { version = "1.0", features = [ "fs", "io-util", "macros", "net", "parking_lot", "process", "rt", "rt-multi-thread", "signal", "time" ] }
+tokio = { version = "1.0", features = [ "fs", "io-util", "io-std", "macros", "net", "parking_lot", "process", "rt", "rt-multi-thread", "signal", "time" ] }
 tokio-openssl = "0.6.1"
 tokio-stream = "0.1.0"
-tokio-util = { version = "0.6", features = [ "codec" ] }
+tokio-util = { version = "0.6", features = [ "codec", "io" ] }
 tower-service = "0.3.0"
 udev = ">= 0.3, <0.5"
 url = "2.1"

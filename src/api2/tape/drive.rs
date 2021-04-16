@@ -10,7 +10,6 @@ use proxmox::{
     identity,
     list_subdirs_api_method,
     tools::Uuid,
-    sys::error::SysError,
     api::{
         api,
         section_config::SectionConfigData,
@@ -42,11 +41,12 @@ use crate::{
             MEDIA_POOL_NAME_SCHEMA,
             Authid,
             DriveListEntry,
-            LinuxTapeDrive,
+            LtoTapeDrive,
             MediaIdFlat,
             LabelUuidMap,
             MamAttribute,
-            LinuxDriveAndMediaStatus,
+            LtoDriveAndMediaStatus,
+            Lp17VolumeStatistics,
         },
         tape::restore::{
             fast_catalog_restore,
@@ -59,10 +59,11 @@ use crate::{
         Inventory,
         MediaCatalog,
         MediaId,
+        BlockReadError,
         lock_media_set,
         lock_media_pool,
         lock_unassigned_media_pool,
-        linux_tape_device_list,
+        lto_tape_device_list,
         lookup_device_identification,
         file_formats::{
             MediaLabel,
@@ -70,9 +71,8 @@ use crate::{
         },
         drive::{
             TapeDriver,
-            LinuxTapeHandle,
-            Lp17VolumeStatistics,
-            open_linux_tape_device,
+            LtoTapeHandle,
+            open_lto_tape_device,
             media_changer,
             required_media_changer,
             open_drive,
@@ -321,8 +321,8 @@ pub fn unload(
         permission: &Permission::Privilege(&["tape", "device", "{drive}"], PRIV_TAPE_WRITE, false),
     },
 )]
-/// Erase media. Check for label-text if given (cancels if wrong media).
-pub fn erase_media(
+/// Format media. Check for label-text if given (cancels if wrong media).
+pub fn format_media(
     drive: String,
     fast: Option<bool>,
     label_text: Option<String>,
@@ -331,7 +331,7 @@ pub fn erase_media(
     let upid_str = run_drive_worker(
         rpcenv,
         drive.clone(),
-        "erase-media",
+        "format-media",
         Some(drive.clone()),
         move |worker, config| {
             if let Some(ref label) = label_text {
@@ -350,15 +350,15 @@ pub fn erase_media(
                     }
                     /* assume drive contains no or unrelated data */
                     task_log!(worker, "unable to read media label: {}", err);
-                    task_log!(worker, "erase anyways");
-                    handle.erase_media(fast.unwrap_or(true))?;
+                    task_log!(worker, "format anyways");
+                    handle.format_media(fast.unwrap_or(true))?;
                 }
                 Ok((None, _)) => {
                     if let Some(label) = label_text {
                         bail!("expected label '{}', found empty tape", label);
                     }
-                    task_log!(worker, "found empty media - erase anyways");
-                    handle.erase_media(fast.unwrap_or(true))?;
+                    task_log!(worker, "found empty media - format anyways");
+                    handle.format_media(fast.unwrap_or(true))?;
                 }
                 Ok((Some(media_id), _key_config)) => {
                     if let Some(label_text) = label_text {
@@ -391,7 +391,7 @@ pub fn erase_media(
                         inventory.remove_media(&media_id.label.uuid)?;
                     };
 
-                    handle.erase_media(fast.unwrap_or(true))?;
+                    handle.format_media(fast.unwrap_or(true))?;
                 }
             }
 
@@ -503,7 +503,7 @@ pub fn eject_media(
 /// Write a new media label to the media in 'drive'. The media is
 /// assigned to the specified 'pool', or else to the free media pool.
 ///
-/// Note: The media need to be empty (you may want to erase it first).
+/// Note: The media need to be empty (you may want to format it first).
 pub fn label_media(
     drive: String,
     pool: Option<String>,
@@ -528,14 +528,11 @@ pub fn label_media(
             drive.rewind()?;
 
             match drive.read_next_file() {
-                Ok(Some(_file)) => bail!("media is not empty (erase first)"),
-                Ok(None) => { /* EOF mark at BOT, assume tape is empty */ },
+                Ok(_reader) => bail!("media is not empty (format it first)"),
+                Err(BlockReadError::EndOfFile) => { /* EOF mark at BOT, assume tape is empty */ },
+                Err(BlockReadError::EndOfStream) => { /* tape is empty */ },
                 Err(err) => {
-                    if err.is_errno(nix::errno::Errno::ENOSPC) || err.is_errno(nix::errno::Errno::EIO) {
-                        /* assume tape is empty */
-                    } else {
-                        bail!("media read error - {}", err);
-                    }
+                    bail!("media read error - {}", err);
                 }
             }
 
@@ -793,9 +790,9 @@ pub fn clean_drive(
 
             changer.clean_drive()?;
 
-             if let Ok(drive_config) = config.lookup::<LinuxTapeDrive>("linux", &drive) {
+             if let Ok(drive_config) = config.lookup::<LtoTapeDrive>("lto", &drive) {
                  // Note: clean_drive unloads the cleaning media, so we cannot use drive_config.open
-                 let mut handle = LinuxTapeHandle::new(open_linux_tape_device(&drive_config.path)?);
+                 let mut handle = LtoTapeHandle::new(open_lto_tape_device(&drive_config.path)?)?;
 
                  // test for critical tape alert flags
                  if let Ok(alert_flags) = handle.tape_alert_flags() {
@@ -1090,18 +1087,15 @@ fn barcode_label_media_worker(
         drive.rewind()?;
 
         match drive.read_next_file() {
-            Ok(Some(_file)) => {
-                worker.log(format!("media '{}' is not empty (erase first)", label_text));
+            Ok(_reader) => {
+                worker.log(format!("media '{}' is not empty (format it first)", label_text));
                 continue;
             }
-            Ok(None) => { /* EOF mark at BOT, assume tape is empty */ },
-            Err(err) => {
-                if err.is_errno(nix::errno::Errno::ENOSPC) || err.is_errno(nix::errno::Errno::EIO) {
-                    /* assume tape is empty */
-                } else {
-                    worker.warn(format!("media '{}' read error (maybe not empty - erase first)", label_text));
-                    continue;
-                }
+            Err(BlockReadError::EndOfFile) => { /* EOF mark at BOT, assume tape is empty */ },
+            Err(BlockReadError::EndOfStream) => { /* tape is empty */ },
+            Err(_err) => {
+                worker.warn(format!("media '{}' read error (maybe not empty - format it first)", label_text));
+                continue;
             }
         }
 
@@ -1143,7 +1137,7 @@ pub async fn cartridge_memory(drive: String) -> Result<Vec<MamAttribute>, Error>
         drive.clone(),
         "reading cartridge memory".to_string(),
         move |config| {
-            let drive_config: LinuxTapeDrive = config.lookup("linux", &drive)?;
+            let drive_config: LtoTapeDrive = config.lookup("lto", &drive)?;
             let mut handle = drive_config.open()?;
 
             handle.cartridge_memory()
@@ -1173,7 +1167,7 @@ pub async fn volume_statistics(drive: String) -> Result<Lp17VolumeStatistics, Er
         drive.clone(),
         "reading volume statistics".to_string(),
         move |config| {
-            let drive_config: LinuxTapeDrive = config.lookup("linux", &drive)?;
+            let drive_config: LtoTapeDrive = config.lookup("lto", &drive)?;
             let mut handle = drive_config.open()?;
 
             handle.volume_statistics()
@@ -1191,24 +1185,24 @@ pub async fn volume_statistics(drive: String) -> Result<Lp17VolumeStatistics, Er
         },
     },
     returns: {
-        type: LinuxDriveAndMediaStatus,
+        type: LtoDriveAndMediaStatus,
     },
     access: {
         permission: &Permission::Privilege(&["tape", "device", "{drive}"], PRIV_TAPE_AUDIT, false),
     },
 )]
 /// Get drive/media status
-pub async fn status(drive: String) -> Result<LinuxDriveAndMediaStatus, Error> {
+pub async fn status(drive: String) -> Result<LtoDriveAndMediaStatus, Error> {
     run_drive_blocking_task(
         drive.clone(),
         "reading drive status".to_string(),
         move |config| {
-            let drive_config: LinuxTapeDrive = config.lookup("linux", &drive)?;
+            let drive_config: LtoTapeDrive = config.lookup("lto", &drive)?;
 
-            // Note: use open_linux_tape_device, because this also works if no medium loaded
-            let file = open_linux_tape_device(&drive_config.path)?;
+            // Note: use open_lto_tape_device, because this also works if no medium loaded
+            let file = open_lto_tape_device(&drive_config.path)?;
 
-            let mut handle = LinuxTapeHandle::new(file);
+            let mut handle = LtoTapeHandle::new(file)?;
 
             handle.get_drive_and_media_status()
         }
@@ -1381,9 +1375,9 @@ pub fn list_drives(
 
     let (config, _) = config::drive::config()?;
 
-    let linux_drives = linux_tape_device_list();
+    let lto_drives = lto_tape_device_list();
 
-    let drive_list: Vec<LinuxTapeDrive> = config.convert_to_typed_array("linux")?;
+    let drive_list: Vec<LtoTapeDrive> = config.convert_to_typed_array("lto")?;
 
     let mut list = Vec::new();
 
@@ -1397,7 +1391,7 @@ pub fn list_drives(
             continue;
         }
 
-        let info = lookup_device_identification(&linux_drives, &drive.path);
+        let info = lookup_device_identification(&lto_drives, &drive.path);
         let state = get_tape_device_state(&config, &drive.name)?;
         let entry = DriveListEntry { config: drive, info, state };
         list.push(entry);
@@ -1429,9 +1423,9 @@ pub const SUBDIRS: SubdirMap = &sorted!([
             .post(&API_METHOD_EJECT_MEDIA)
     ),
     (
-        "erase-media",
+        "format-media",
         &Router::new()
-            .post(&API_METHOD_ERASE_MEDIA)
+            .post(&API_METHOD_FORMAT_MEDIA)
     ),
     (
         "export-media",

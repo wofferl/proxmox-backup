@@ -43,6 +43,7 @@ use proxmox_backup::{
         media_pool::complete_pool_name,
     },
     tape::{
+        BlockReadError,
         drive::{
             open_drive,
             lock_tape_device,
@@ -115,8 +116,8 @@ pub fn extract_drive_name(
        },
     },
 )]
-/// Erase media
-async fn erase_media(mut param: Value) -> Result<(), Error> {
+/// Format media
+async fn format_media(mut param: Value) -> Result<(), Error> {
 
     let output_format = get_output_format(&param);
 
@@ -126,7 +127,7 @@ async fn erase_media(mut param: Value) -> Result<(), Error> {
 
     let mut client = connect_to_localhost()?;
 
-    let path = format!("api2/json/tape/drive/{}/erase-media", drive);
+    let path = format!("api2/json/tape/drive/{}/format-media", drive);
     let result = client.post(&path, Some(param)).await?;
 
     view_task_result(&mut client, result, &output_format).await?;
@@ -551,7 +552,7 @@ fn move_to_eom(mut param: Value) -> Result<(), Error> {
 
     let mut drive = open_drive(&config, &drive)?;
 
-    drive.move_to_eom()?;
+    drive.move_to_eom(false)?;
 
     Ok(())
 }
@@ -587,12 +588,19 @@ fn debug_scan(mut param: Value) -> Result<(), Error> {
     loop {
         let file_number = drive.current_file_number()?;
 
-        match drive.read_next_file()? {
-            None => {
-                println!("EOD");
+        match drive.read_next_file() {
+            Err(BlockReadError::EndOfFile) => {
+                println!("filemark number {}", file_number);
                 continue;
-            },
-            Some(mut reader) => {
+            }
+            Err(BlockReadError::EndOfStream) => {
+                println!("got EOT");
+                return Ok(());
+            }
+            Err(BlockReadError::Error(err)) => {
+                return Err(err.into());
+            }
+            Ok(mut reader) => {
                 println!("got file number {}", file_number);
 
                 let header: Result<MediaContentHeader, _> = unsafe { reader.read_le_value() };
@@ -614,8 +622,15 @@ fn debug_scan(mut param: Value) -> Result<(), Error> {
                         println!("unable to read content header - {}", err);
                     }
                 }
-                let bytes = reader.skip_to_end()?;
+                let bytes = reader.skip_data()?;
                 println!("skipped {}", HumanByte::from(bytes));
+                if let Ok(true) = reader.has_end_marker() {
+                    if reader.is_incomplete()? {
+                        println!("WARNING: file is incomplete");
+                    }
+                } else {
+                    println!("WARNING: file without end marker");
+                }
             }
         }
     }
@@ -741,8 +756,9 @@ async fn status(mut param: Value) -> Result<(), Error> {
     let options = default_table_format_options()
         .column(ColumnConfig::new("blocksize"))
         .column(ColumnConfig::new("density"))
-        .column(ColumnConfig::new("status"))
-        .column(ColumnConfig::new("options"))
+        .column(ColumnConfig::new("compression"))
+        .column(ColumnConfig::new("buffer-mode"))
+        .column(ColumnConfig::new("write-protect"))
         .column(ColumnConfig::new("alert-flags"))
         .column(ColumnConfig::new("file-number"))
         .column(ColumnConfig::new("block-number"))
@@ -992,8 +1008,8 @@ fn main() {
                 .completion_cb("drive", complete_drive_name)
         )
         .insert(
-            "erase",
-            CliCommand::new(&API_METHOD_ERASE_MEDIA)
+            "format",
+            CliCommand::new(&API_METHOD_FORMAT_MEDIA)
                 .completion_cb("drive", complete_drive_name)
         )
         .insert(

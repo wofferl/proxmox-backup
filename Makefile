@@ -9,6 +9,7 @@ SUBDIRS := etc www docs
 # Binaries usable by users
 USR_BIN := \
 	proxmox-backup-client 	\
+	proxmox-file-restore	\
 	pxar			\
 	proxmox-tape		\
 	pmtx			\
@@ -25,6 +26,10 @@ SERVICE_BIN := \
 	proxmox-backup-proxy \
 	proxmox-daily-update
 
+# Single file restore daemon
+RESTORE_BIN := \
+	proxmox-restore-daemon
+
 ifeq ($(BUILD_MODE), release)
 CARGO_BUILD_ARGS += --release
 COMPILEDIR := target/release
@@ -39,7 +44,7 @@ endif
 CARGO ?= cargo
 
 COMPILED_BINS := \
-	$(addprefix $(COMPILEDIR)/,$(USR_BIN) $(USR_SBIN) $(SERVICE_BIN))
+	$(addprefix $(COMPILEDIR)/,$(USR_BIN) $(USR_SBIN) $(SERVICE_BIN) $(RESTORE_BIN))
 
 export DEB_VERSION DEB_VERSION_UPSTREAM
 
@@ -47,9 +52,12 @@ SERVER_DEB=${PACKAGE}-server_${DEB_VERSION}_${ARCH}.deb
 SERVER_DBG_DEB=${PACKAGE}-server-dbgsym_${DEB_VERSION}_${ARCH}.deb
 CLIENT_DEB=${PACKAGE}-client_${DEB_VERSION}_${ARCH}.deb
 CLIENT_DBG_DEB=${PACKAGE}-client-dbgsym_${DEB_VERSION}_${ARCH}.deb
+RESTORE_DEB=proxmox-backup-file-restore_${DEB_VERSION}_${ARCH}.deb
+RESTORE_DBG_DEB=proxmox-backup-file-restore-dbgsym_${DEB_VERSION}_${ARCH}.deb
 DOC_DEB=${PACKAGE}-docs_${DEB_VERSION}_all.deb
 
-DEBS=${SERVER_DEB} ${SERVER_DBG_DEB} ${CLIENT_DEB} ${CLIENT_DBG_DEB}
+DEBS=${SERVER_DEB} ${SERVER_DBG_DEB} ${CLIENT_DEB} ${CLIENT_DBG_DEB} \
+     ${RESTORE_DEB} ${RESTORE_DBG_DEB}
 
 DSC = rust-${PACKAGE}_${DEB_VERSION}.dsc
 
@@ -117,8 +125,8 @@ clean:
 	find . -name '*~' -exec rm {} ';'
 
 .PHONY: dinstall
-dinstall: ${DEBS}
-	dpkg -i ${DEBS}
+dinstall: ${SERVER_DEB} ${SERVER_DBG_DEB} ${CLIENT_DEB} ${CLIENT_DBG_DEB}
+	dpkg -i $^
 
 # make sure we build binaries before docs
 docs: cargo-build
@@ -144,6 +152,9 @@ install: $(COMPILED_BINS)
 	    install -m755 $(COMPILEDIR)/$(i) $(DESTDIR)$(SBINDIR)/ ; \
 	    install -m644 zsh-completions/_$(i) $(DESTDIR)$(ZSH_COMPL_DEST)/ ;)
 	install -dm755 $(DESTDIR)$(LIBEXECDIR)/proxmox-backup
+	install -dm755 $(DESTDIR)$(LIBEXECDIR)/proxmox-backup/file-restore
+	$(foreach i,$(RESTORE_BIN), \
+	    install -m755 $(COMPILEDIR)/$(i) $(DESTDIR)$(LIBEXECDIR)/proxmox-backup/file-restore/ ;)
 	# install sg-tape-cmd as setuid binary
 	install -m4755 -o root -g root $(COMPILEDIR)/sg-tape-cmd $(DESTDIR)$(LIBEXECDIR)/proxmox-backup/sg-tape-cmd
 	$(foreach i,$(SERVICE_BIN), \
@@ -152,8 +163,10 @@ install: $(COMPILED_BINS)
 	$(MAKE) -C docs install
 
 .PHONY: upload
-upload: ${SERVER_DEB} ${CLIENT_DEB} ${DOC_DEB}
+upload: ${SERVER_DEB} ${CLIENT_DEB} ${RESTORE_DEB} ${DOC_DEB}
 	# check if working directory is clean
 	git diff --exit-code --stat && git diff --exit-code --stat --staged
-	tar cf - ${SERVER_DEB} ${SERVER_DBG_DEB} ${DOC_DEB} | ssh -X repoman@repo.proxmox.com upload --product pbs --dist buster
-	tar cf - ${CLIENT_DEB} ${CLIENT_DBG_DEB} | ssh -X repoman@repo.proxmox.com upload --product "pbs,pve,pmg" --dist buster
+	tar cf - ${SERVER_DEB} ${SERVER_DBG_DEB} ${DOC_DEB} ${CLIENT_DEB} ${CLIENT_DBG_DEB} | \
+	    ssh -X repoman@repo.proxmox.com upload --product pbs --dist buster
+	tar cf - ${CLIENT_DEB} ${CLIENT_DBG_DEB} | ssh -X repoman@repo.proxmox.com upload --product "pve,pmg" --dist buster
+	tar cf - ${RESTORE_DEB} ${RESTORE_DBG_DEB} | ssh -X repoman@repo.proxmox.com upload --product "pve" --dist buster

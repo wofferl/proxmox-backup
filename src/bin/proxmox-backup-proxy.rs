@@ -14,6 +14,7 @@ use proxmox::api::RpcEnvironmentType;
 use proxmox_backup::{
     backup::DataStore,
     server::{
+        auth::default_api_auth,
         WorkerTask,
         ApiConfig,
         rest::*,
@@ -40,6 +41,7 @@ use proxmox_backup::tools::{
     disks::{
         DiskManage,
         zfs_pool_stats,
+        get_pool_from_dataset,
     },
     logrotate::LogRotate,
     socket::{
@@ -84,12 +86,11 @@ async fn run() -> Result<(), Error> {
     let _ = csrf_secret(); // load with lazy_static
 
     let mut config = ApiConfig::new(
-        buildcfg::JS_DIR, &proxmox_backup::api2::ROUTER, RpcEnvironmentType::PUBLIC)?;
-
-    // Enable experimental tape UI if tape.cfg exists
-    if Path::new("/etc/proxmox-backup/tape.cfg").exists() {
-        config.enable_tape_ui = true;
-    }
+        buildcfg::JS_DIR,
+        &proxmox_backup::api2::ROUTER,
+        RpcEnvironmentType::PUBLIC,
+        default_api_auth(),
+    )?;
 
     config.add_alias("novnc", "/usr/share/novnc-pve");
     config.add_alias("extjs", "/usr/share/javascript/extjs");
@@ -865,8 +866,9 @@ fn gather_disk_stats(disk_manager: Arc<DiskManage>, path: &Path, rrd_prefix: &st
             let mut device_stat = None;
             match fs_type.as_str() {
                 "zfs" => {
-                    if let Some(pool) = source {
-                        match zfs_pool_stats(&pool) {
+                    if let Some(source) = source {
+                        let pool = get_pool_from_dataset(&source).unwrap_or(&source);
+                        match zfs_pool_stats(pool) {
                             Ok(stat) => device_stat = stat,
                             Err(err) => eprintln!("zfs_pool_stats({:?}) failed - {}", pool, err),
                         }

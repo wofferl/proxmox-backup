@@ -41,13 +41,11 @@ Ext.define('PBS.TapeManagement.DriveStatus', {
 	onLoad: function() {
 	    let me = this;
 	    let statusgrid = me.lookup('statusgrid');
-	    let statusFlags = (statusgrid.getObjectValue('status') || "").split(/\s+|\s+/);
-	    let online = statusFlags.indexOf('ONLINE') !== -1;
+	    let online = statusgrid.getObjectValue('file-number') !== undefined;
 	    let vm = me.getViewModel();
 	    vm.set('online', online);
-	    if (!online) {
-		me.lookup('cartridgegrid').getStore().removeAll();
-	    }
+	    let title = online ? gettext('Status') : gettext('Status (No Tape loaded)');
+	    statusgrid.setTitle(title);
 	},
 
 	onStateLoad: function(store) {
@@ -84,11 +82,11 @@ Ext.define('PBS.TapeManagement.DriveStatus', {
 	    }).show();
 	},
 
-	erase: function() {
+	format: function() {
 	    let me = this;
 	    let view = me.getView();
 	    let driveid = view.drive;
-	    PBS.Utils.driveCommand(driveid, 'erase-media', {
+	    PBS.Utils.driveCommand(driveid, 'format-media', {
 		waitMsgTarget: view,
 		method: 'POST',
 		success: function(response) {
@@ -172,7 +170,7 @@ Ext.define('PBS.TapeManagement.DriveStatus', {
 	init: function(view) {
 	    let me = this;
 	    me.mon(me.lookup('statusgrid').getStore().rstore, 'load', 'onLoad');
-	    let tapeStore = Ext.ComponentQuery.query('navigationtree')[0].tapestore;
+	    let tapeStore = Ext.ComponentQuery.query('navigationtree')[0].tapeStore;
 	    me.mon(tapeStore, 'load', 'onStateLoad');
 	    if (tapeStore.isLoaded()) {
 		me.onStateLoad(tapeStore);
@@ -212,12 +210,12 @@ Ext.define('PBS.TapeManagement.DriveStatus', {
 	    },
 	},
 	{
-	    text: gettext('Erase'),
+	    text: gettext('Format'),
 	    xtype: 'proxmoxButton',
-	    handler: 'erase',
+	    handler: 'format',
 	    iconCls: 'fa fa-trash-o',
 	    dangerous: true,
-	    confirmMsg: gettext('Are you sure you want to erase the inserted tape?'),
+	    confirmMsg: gettext('Are you sure you want to format the inserted tape?'),
 	    disabled: true,
 	    bind: {
 		disabled: '{!online}',
@@ -303,6 +301,10 @@ Ext.define('PBS.TapeManagement.DriveStatusGrid', {
     title: gettext('Status'),
 
     rows: {
+	'density': {
+	    required: true,
+	    header: gettext('Tape Density'),
+	},
 	'blocksize': {
 	    required: true,
 	    header: gettext('Block Size'),
@@ -313,17 +315,32 @@ Ext.define('PBS.TapeManagement.DriveStatusGrid', {
 		return `${gettext('Fixed')} - ${Proxmox.Utils.format_size(value)}`;
 	    },
 	},
-	'options': {
+	'write-protect': {
 	    required: true,
-	    header: gettext('Options'),
-	    defaultValue: '',
+	    header: gettext('Write Protect'),
+	    defaultValue: false,
+	    renderer: Proxmox.Utils.format_boolean,
 	},
-	'status': {
+	'compression': {
 	    required: true,
-	    header: gettext('Status'),
+	    header: gettext('Compression'),
+	    renderer: Proxmox.Utils.format_boolean,
 	},
-	'density': {
-	    header: gettext('Tape Density'),
+	'file-number': {
+	    header: gettext('Tape Position'),
+	    renderer: function(value, mD, r, rI, cI, store) {
+		let me = this;
+		let filenr = value;
+		let rec = store.getById('block-number');
+		if (rec) {
+		    let blocknr = rec.data.value;
+		    return `File ${filenr}, Block ${blocknr}`;
+		}
+		return `File ${filenr}`;
+	    },
+	},
+	'block-number': {
+	    visible: false,
 	},
 	'manufactured': {
 	    header: gettext('Tape Manufacture Date'),
@@ -353,6 +370,9 @@ Ext.define('PBS.TapeManagement.DriveStatusGrid', {
 		}
 		return value;
 	    },
+	},
+	'alert-flags': {
+	    header: gettext('Alert Flags'),
 	},
     },
 });
@@ -511,7 +531,7 @@ Ext.define('PBS.TapeManagement.DriveInfoPanel', {
 
 	me.callParent();
 
-	let tapeStore = Ext.ComponentQuery.query('navigationtree')[0].tapestore;
+	let tapeStore = Ext.ComponentQuery.query('navigationtree')[0].tapeStore;
 	me.mon(tapeStore, 'load', me.updateData, me);
 	if (tapeStore.isLoaded()) {
 	    me.updateData(tapeStore);

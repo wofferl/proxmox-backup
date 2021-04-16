@@ -21,8 +21,8 @@ pub const DRIVE_NAME_SCHEMA: Schema = StringSchema::new("Drive Identifier.")
     .max_length(32)
     .schema();
 
-pub const LINUX_DRIVE_PATH_SCHEMA: Schema = StringSchema::new(
-    "The path to a LINUX non-rewinding SCSI tape device (i.e. '/dev/nst0')")
+pub const LTO_DRIVE_PATH_SCHEMA: Schema = StringSchema::new(
+    "The path to a LTO SCSI-generic tape device (i.e. '/dev/sg0')")
     .schema();
 
 pub const CHANGER_DRIVENUM_SCHEMA: Schema = IntegerSchema::new(
@@ -57,7 +57,7 @@ pub struct VirtualTapeDrive {
             schema: DRIVE_NAME_SCHEMA,
         },
         path: {
-            schema: LINUX_DRIVE_PATH_SCHEMA,
+            schema: LTO_DRIVE_PATH_SCHEMA,
         },
         changer: {
             schema: CHANGER_NAME_SCHEMA,
@@ -71,8 +71,8 @@ pub struct VirtualTapeDrive {
 )]
 #[derive(Serialize,Deserialize)]
 #[serde(rename_all = "kebab-case")]
-/// Linux SCSI tape driver
-pub struct LinuxTapeDrive {
+/// Lto SCSI tape driver
+pub struct LtoTapeDrive {
     pub name: String,
     pub path: String,
     #[serde(skip_serializing_if="Option::is_none")]
@@ -84,7 +84,7 @@ pub struct LinuxTapeDrive {
 #[api(
     properties: {
         config: {
-            type: LinuxTapeDrive,
+            type: LtoTapeDrive,
         },
         info: {
             type: OptionalDeviceIdentification,
@@ -96,7 +96,7 @@ pub struct LinuxTapeDrive {
 /// Drive list entry
 pub struct DriveListEntry {
     #[serde(flatten)]
-    pub config: LinuxTapeDrive,
+    pub config: LtoTapeDrive,
     #[serde(flatten)]
     pub info: OptionalDeviceIdentification,
     /// the state of the drive if locked
@@ -119,6 +119,8 @@ pub struct MamAttribute {
 #[api()]
 #[derive(Serialize,Deserialize,Copy,Clone,Debug)]
 pub enum TapeDensity {
+    /// Unknown (no media loaded)
+    Unknown,
     /// LTO1
     LTO1,
     /// LTO2
@@ -144,6 +146,7 @@ impl TryFrom<u8> for TapeDensity {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         let density = match value {
+            0x00 => TapeDensity::Unknown,
             0x40 => TapeDensity::LTO1,
             0x42 => TapeDensity::LTO2,
             0x44 => TapeDensity::LTO3,
@@ -169,29 +172,37 @@ impl TryFrom<u8> for TapeDensity {
 )]
 #[derive(Serialize,Deserialize)]
 #[serde(rename_all = "kebab-case")]
-/// Drive/Media status for Linux SCSI drives.
+/// Drive/Media status for Lto SCSI drives.
 ///
 /// Media related data is optional - only set if there is a medium
 /// loaded.
-pub struct LinuxDriveAndMediaStatus {
+pub struct LtoDriveAndMediaStatus {
+    /// Vendor
+    pub vendor: String,
+    /// Product
+    pub product: String,
+    /// Revision
+    pub revision: String,
     /// Block size (0 is variable size)
     pub blocksize: u32,
+    /// Compression enabled
+    pub compression: bool,
+    /// Drive buffer mode
+    pub buffer_mode: u8,
     /// Tape density
+    pub density: TapeDensity,
+    /// Media is write protected
     #[serde(skip_serializing_if="Option::is_none")]
-    pub density: Option<TapeDensity>,
-    /// Status flags
-    pub status: String,
-    /// Linux Driver Options
-    pub options: String,
+    pub write_protect: Option<bool>,
     /// Tape Alert Flags
     #[serde(skip_serializing_if="Option::is_none")]
     pub alert_flags: Option<String>,
     /// Current file number
     #[serde(skip_serializing_if="Option::is_none")]
-    pub file_number: Option<u32>,
+    pub file_number: Option<u64>,
     /// Current block number
     #[serde(skip_serializing_if="Option::is_none")]
-    pub block_number: Option<u32>,
+    pub block_number: Option<u64>,
     /// Medium Manufacture Date (epoch)
     #[serde(skip_serializing_if="Option::is_none")]
     pub manufactured: Option<i64>,
@@ -211,4 +222,63 @@ pub struct LinuxDriveAndMediaStatus {
     /// Estimated tape wearout factor (assuming max. 16000 end-to-end passes)
     #[serde(skip_serializing_if="Option::is_none")]
     pub medium_wearout: Option<f64>,
+}
+
+#[api()]
+/// Volume statistics from SCSI log page 17h
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct Lp17VolumeStatistics {
+    /// Volume mounts (thread count)
+    pub volume_mounts: u64,
+    /// Total data sets written
+    pub volume_datasets_written: u64,
+    /// Write retries
+    pub volume_recovered_write_data_errors: u64,
+    /// Total unrecovered write errors
+    pub volume_unrecovered_write_data_errors: u64,
+    /// Total suspended writes
+    pub volume_write_servo_errors: u64,
+    /// Total fatal suspended writes
+    pub volume_unrecovered_write_servo_errors: u64,
+    /// Total datasets read
+    pub volume_datasets_read: u64,
+    /// Total read retries
+    pub volume_recovered_read_errors: u64,
+    /// Total unrecovered read errors
+    pub volume_unrecovered_read_errors: u64,
+    /// Last mount unrecovered write errors
+    pub last_mount_unrecovered_write_errors: u64,
+    /// Last mount unrecovered read errors
+    pub last_mount_unrecovered_read_errors: u64,
+    /// Last mount bytes written
+    pub last_mount_bytes_written: u64,
+    /// Last mount bytes read
+    pub last_mount_bytes_read: u64,
+    /// Lifetime bytes written
+    pub lifetime_bytes_written: u64,
+    /// Lifetime bytes read
+    pub lifetime_bytes_read: u64,
+    /// Last load write compression ratio
+    pub last_load_write_compression_ratio: u64,
+    /// Last load read compression ratio
+    pub last_load_read_compression_ratio: u64,
+    /// Medium mount time
+    pub medium_mount_time: u64,
+    /// Medium ready time
+    pub medium_ready_time: u64,
+    /// Total native capacity
+    pub total_native_capacity: u64,
+    /// Total used native capacity
+    pub total_used_native_capacity: u64,
+    /// Write protect
+    pub write_protect: bool,
+    /// Volume is WORM
+    pub worm: bool,
+    /// Beginning of medium passes
+    pub beginning_of_medium_passes: u64,
+    /// Middle of medium passes
+    pub middle_of_tape_passes: u64,
+    /// Volume serial number
+    pub serial: String,
 }

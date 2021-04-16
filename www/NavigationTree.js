@@ -80,6 +80,14 @@ Ext.define('PBS.store.NavigationStore', {
 		],
 	    },
 	    {
+		text: "Tape Backup",
+		iconCls: 'pbs-icon-tape',
+		id: 'tape_management',
+		path: 'pbsTapeManagement',
+		expanded: true,
+		children: [],
+	    },
+	    {
 		text: gettext('Datastore'),
 		iconCls: 'fa fa-archive',
 		id: 'datastores',
@@ -93,6 +101,7 @@ Ext.define('PBS.store.NavigationStore', {
 			iconCls: 'fa fa-plus-circle',
 			leaf: true,
 			id: 'addbutton',
+			virtualEntry: true,
 		    },
 		],
 	    },
@@ -118,29 +127,15 @@ Ext.define('PBS.view.main.NavigationTree', {
 	    view.rstore.on('load', this.onLoad, this);
 	    view.on('destroy', view.rstore.stopUpdate);
 
-	    if (PBS.enableTapeUI) {
-		if (view.tapestore === undefined) {
-		    view.tapestore = Ext.create('Proxmox.data.UpdateStore', {
-			autoStart: true,
-			interval: 60 * 1000,
-			storeid: 'pbs-tape-drive-list',
-			model: 'pbs-tape-drive-list',
-		    });
-		    view.tapestore.on('load', this.onTapeDriveLoad, this);
-		    view.on('destroy', view.tapestore.stopUpdate);
-		}
-
-		let root = view.getStore().getRoot();
-		if (root.findChild('id', 'tape_management', false) === null) {
-		    root.insertChild(3, {
-			text: "Tape Backup",
-			iconCls: 'pbs-icon-tape',
-			id: 'tape_management',
-			path: 'pbsTapeManagement',
-			expanded: true,
-			children: [],
-		    });
-		}
+	    if (view.tapeStore === undefined) {
+		view.tapeStore = Ext.create('Proxmox.data.UpdateStore', {
+		    autoStart: true,
+		    interval: 60 * 1000,
+		    storeid: 'pbs-tape-drive-list',
+		    model: 'pbs-tape-drive-list',
+		});
+		view.tapeStore.on('load', this.onTapeDriveLoad, this);
+		view.on('destroy', view.tapeStore.stopUpdate);
 	    }
 	},
 
@@ -151,9 +146,9 @@ Ext.define('PBS.view.main.NavigationTree', {
 	    let root = view.getStore().getRoot();
 
 	    records.sort((a, b) => a.data.name.localeCompare(b.data.name));
-	    let list = root.findChild('id', 'tape_management', false);
-	    let newSet = {};
 
+	    let list = root.findChild('id', 'tape_management', false);
+	    let existingChildren = {};
 	    for (const drive of records) {
 		let path, text, iconCls;
 		if (drive.data.changer !== undefined) {
@@ -165,7 +160,7 @@ Ext.define('PBS.view.main.NavigationTree', {
 		    path = `Drive-${text}`;
 		    iconCls = 'pbs-icon-tape-drive';
 		}
-		newSet[path] = {
+		existingChildren[path] = {
 		    text,
 		    path,
 		    iconCls,
@@ -173,7 +168,7 @@ Ext.define('PBS.view.main.NavigationTree', {
 		};
 	    }
 
-	    let paths = Object.keys(newSet).sort();
+	    let paths = Object.keys(existingChildren).sort();
 
 	    let oldIdx = 0;
 	    for (let newIdx = 0; newIdx < paths.length; newIdx++) {
@@ -184,17 +179,17 @@ Ext.define('PBS.view.main.NavigationTree', {
 		}
 
 		if (oldIdx >= list.childNodes.length || list.getChildAt(oldIdx).data.path !== newPath) {
-		    list.insertChild(oldIdx, newSet[newPath]);
+		    list.insertChild(oldIdx, existingChildren[newPath]);
 		}
 	    }
 
-	    let toremove = [];
+	    let toRemove = [];
 	    list.eachChild((child) => {
-		if (!newSet[child.data.path]) {
-		    toremove.push(child);
+		if (!existingChildren[child.data.path]) {
+		    toRemove.push(child);
 		}
 	    });
-	    toremove.forEach((child) => list.removeChild(child, true));
+	    toRemove.forEach((child) => list.removeChild(child, true));
 
 	    if (view.pathToSelect !== undefined) {
 		let path = view.pathToSelect;
@@ -204,27 +199,26 @@ Ext.define('PBS.view.main.NavigationTree', {
 	},
 
 	onLoad: function(store, records, success) {
-	    if (!success) return;
-	    var view = this.getView();
-
+	    if (!success) {
+		return;
+	    }
+	    let view = this.getView();
 	    let root = view.getStore().getRoot();
 
 	    records.sort((a, b) => a.id.localeCompare(b.id));
 
-	    var list = root.findChild('id', 'datastores', false);
-	    var length = records.length;
-	    var lookup_hash = {};
-	    let j = 0;
-	    for (let i = 0; i < length; i++) {
+	    let list = root.findChild('id', 'datastores', false);
+	    let getChildTextAt = i => list.getChildAt(i).data.text;
+	    let existingChildren = {};
+	    for (let i = 0, j = 0, length = records.length; i < length; i++) {
 		let name = records[i].id;
-		lookup_hash[name] = true;
+		existingChildren[name] = true;
 
-		while (name.localeCompare(list.getChildAt(j).data.text) > 0 &&
-		       (j + 1) < list.childNodes.length) {
+		while (name.localeCompare(getChildTextAt(j)) > 0 && (j+1) < list.childNodes.length) {
 		    j++;
 		}
 
-		if (list.getChildAt(j).data.text.localeCompare(name) !== 0) {
+		if (getChildTextAt(j).localeCompare(name) !== 0) {
 		    list.insertChild(j, {
 			text: name,
 			path: `DataStore-${name}`,
@@ -234,15 +228,14 @@ Ext.define('PBS.view.main.NavigationTree', {
 		}
 	    }
 
-	    var erase_list = [];
-	    list.eachChild(function(node) {
-		let name = node.data.text;
-		if (!lookup_hash[name] && node.data.id !== 'addbutton') {
-		    erase_list.push(node);
+	    // remove entries which are not existing anymore
+	    let toRemove = [];
+	    list.eachChild(child => {
+		if (!existingChildren[child.data.text] && !child.data.virtualEntry) {
+		    toRemove.push(child);
 		}
 	    });
-
-	    Ext.Array.forEach(erase_list, function(node) { list.removeChild(node, true); });
+	    toRemove.forEach(child => list.removeChild(child, true));
 
 	    if (view.pathToSelect !== undefined) {
 		let path = view.pathToSelect;
@@ -258,9 +251,7 @@ Ext.define('PBS.view.main.NavigationTree', {
 		let me = this;
 		Ext.create('PBS.DataStoreEdit', {
 		    listeners: {
-			destroy: function() {
-			    me.rstore.reload();
-			},
+			destroy: () => me.rstore.reload(),
 		    },
 		}).show();
 		return false;
@@ -271,16 +262,12 @@ Ext.define('PBS.view.main.NavigationTree', {
 
     reloadTapeStore: function() {
 	let me = this;
-	if (!PBS.enableTapeUI) {
-	    return;
-	}
-
-	me.tapestore.load();
+	me.tapeStore.load();
     },
 
     select: function(path, silent) {
 	var me = this;
-	if (me.rstore.isLoaded() && (!PBS.enableTapeUI || me.tapestore.isLoaded())) {
+	if (me.rstore.isLoaded() && me.tapeStore.isLoaded()) {
 	    if (silent) {
 		me.suspendEvents(false);
 	    }

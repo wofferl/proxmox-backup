@@ -1,8 +1,8 @@
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{Ordering, AtomicUsize};
-use std::time::Instant;
 use nix::dir::Dir;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::{bail, format_err, Error};
 
@@ -25,8 +25,8 @@ use crate::{
     server::UPID,
     task::TaskState,
     task_log,
-    tools::ParallelHandler,
     tools::fs::lock_dir_noblock_shared,
+    tools::ParallelHandler,
 };
 
 /// A VerifyWorker encapsulates a task worker, datastore and information about which chunks have
@@ -34,8 +34,8 @@ use crate::{
 pub struct VerifyWorker {
     worker: Arc<dyn TaskState + Send + Sync>,
     datastore: Arc<DataStore>,
-    verified_chunks: Arc<Mutex<HashSet<[u8;32]>>>,
-    corrupt_chunks: Arc<Mutex<HashSet<[u8;32]>>>,
+    verified_chunks: Arc<Mutex<HashSet<[u8; 32]>>>,
+    corrupt_chunks: Arc<Mutex<HashSet<[u8; 32]>>>,
 }
 
 impl VerifyWorker {
@@ -45,15 +45,18 @@ impl VerifyWorker {
             worker,
             datastore,
             // start with 16k chunks == up to 64G data
-            verified_chunks: Arc::new(Mutex::new(HashSet::with_capacity(16*1024))),
+            verified_chunks: Arc::new(Mutex::new(HashSet::with_capacity(16 * 1024))),
             // start with 64 chunks since we assume there are few corrupt ones
             corrupt_chunks: Arc::new(Mutex::new(HashSet::with_capacity(64))),
         }
     }
 }
 
-fn verify_blob(datastore: Arc<DataStore>, backup_dir: &BackupDir, info: &FileInfo) -> Result<(), Error> {
-
+fn verify_blob(
+    datastore: Arc<DataStore>,
+    backup_dir: &BackupDir,
+    info: &FileInfo,
+) -> Result<(), Error> {
     let blob = datastore.load_blob(backup_dir, &info.filename)?;
 
     let raw_size = blob.raw_size();
@@ -88,7 +91,11 @@ fn rename_corrupted_chunk(
     let mut new_path = path.clone();
     loop {
         new_path.set_file_name(format!("{}.{}.bad", digest_str, counter));
-        if new_path.exists() && counter < 9 { counter += 1; } else { break; }
+        if new_path.exists() && counter < 9 {
+            counter += 1;
+        } else {
+            break;
+        }
     }
 
     match std::fs::rename(&path, &new_path) {
@@ -109,7 +116,6 @@ fn verify_index_chunks(
     index: Box<dyn IndexFile + Send>,
     crypt_mode: CryptMode,
 ) -> Result<(), Error> {
-
     let errors = Arc::new(AtomicUsize::new(0));
 
     let start_time = Instant::now();
@@ -124,8 +130,9 @@ fn verify_index_chunks(
     let errors2 = Arc::clone(&errors);
 
     let decoder_pool = ParallelHandler::new(
-        "verify chunk decoder", 4,
-        move |(chunk, digest, size): (DataBlob, [u8;32], u64)| {
+        "verify chunk decoder",
+        4,
+        move |(chunk, digest, size): (DataBlob, [u8; 32], u64)| {
             let chunk_crypt_mode = match chunk.crypt_mode() {
                 Err(err) => {
                     corrupt_chunks2.lock().unwrap().insert(digest);
@@ -159,23 +166,65 @@ fn verify_index_chunks(
         }
     );
 
-    for pos in 0..index.index_count() {
+    let skip_chunk = |digest: &[u8; 32]| -> bool {
+        if verify_worker.verified_chunks.lock().unwrap().contains(digest) {
+            true
+        } else if verify_worker.corrupt_chunks.lock().unwrap().contains(digest) {
+            let digest_str = proxmox::tools::digest_to_hex(digest);
+            task_log!(verify_worker.worker, "chunk {} was marked as corrupt", digest_str);
+            errors.fetch_add(1, Ordering::SeqCst);
+            true
+        } else {
+            false
+        }
+    };
 
+    let index_count = index.index_count();
+    let mut chunk_list = Vec::with_capacity(index_count);
+
+    use std::os::unix::fs::MetadataExt;
+
+    for pos in 0..index_count {
+        if pos & 1023 == 0 {
+            verify_worker.worker.check_abort()?;
+            crate::tools::fail_on_shutdown()?;
+        }
+
+        let info = index.chunk_info(pos).unwrap();
+
+        if skip_chunk(&info.digest) {
+            continue; // already verified or marked corrupt
+        }
+
+        match verify_worker.datastore.stat_chunk(&info.digest) {
+            Err(err) => {
+                verify_worker.corrupt_chunks.lock().unwrap().insert(info.digest);
+                task_log!(verify_worker.worker, "can't verify chunk, stat failed - {}", err);
+                errors.fetch_add(1, Ordering::SeqCst);
+                rename_corrupted_chunk(
+                    verify_worker.datastore.clone(),
+                    &info.digest,
+                    &verify_worker.worker,
+                );
+            }
+            Ok(metadata) => {
+                chunk_list.push((pos, metadata.ino()));
+            }
+        }
+    }
+
+    // sorting by inode improves data locality, which makes it lots faster on spinners
+    chunk_list.sort_unstable_by(|(_, ino_a), (_, ino_b)| ino_a.cmp(&ino_b));
+
+    for (pos, _) in chunk_list {
         verify_worker.worker.check_abort()?;
         crate::tools::fail_on_shutdown()?;
 
         let info = index.chunk_info(pos).unwrap();
-        let size = info.size();
 
-        if verify_worker.verified_chunks.lock().unwrap().contains(&info.digest) {
-            continue; // already verified
-        }
-
-        if verify_worker.corrupt_chunks.lock().unwrap().contains(&info.digest) {
-            let digest_str = proxmox::tools::digest_to_hex(&info.digest);
-            task_log!(verify_worker.worker, "chunk {} was marked as corrupt", digest_str);
-            errors.fetch_add(1, Ordering::SeqCst);
-            continue;
+        // we must always recheck this here, the parallel worker below alter it!
+        if skip_chunk(&info.digest) {
+            continue; // already verified or marked corrupt
         }
 
         match verify_worker.datastore.load_chunk(&info.digest) {
@@ -183,10 +232,14 @@ fn verify_index_chunks(
                 verify_worker.corrupt_chunks.lock().unwrap().insert(info.digest);
                 task_log!(verify_worker.worker, "can't verify chunk, load failed - {}", err);
                 errors.fetch_add(1, Ordering::SeqCst);
-                rename_corrupted_chunk(verify_worker.datastore.clone(), &info.digest, &verify_worker.worker);
-                continue;
+                rename_corrupted_chunk(
+                    verify_worker.datastore.clone(),
+                    &info.digest,
+                    &verify_worker.worker,
+                );
             }
             Ok(chunk) => {
+                let size = info.size();
                 read_bytes += chunk.raw_size();
                 decoder_pool.send((chunk, info.digest, size))?;
                 decoded_bytes += size;
@@ -198,11 +251,11 @@ fn verify_index_chunks(
 
     let elapsed = start_time.elapsed().as_secs_f64();
 
-    let read_bytes_mib = (read_bytes as f64)/(1024.0*1024.0);
-    let decoded_bytes_mib = (decoded_bytes as f64)/(1024.0*1024.0);
+    let read_bytes_mib = (read_bytes as f64) / (1024.0 * 1024.0);
+    let decoded_bytes_mib = (decoded_bytes as f64) / (1024.0 * 1024.0);
 
-    let read_speed = read_bytes_mib/elapsed;
-    let decode_speed = decoded_bytes_mib/elapsed;
+    let read_speed = read_bytes_mib / elapsed;
+    let decode_speed = decoded_bytes_mib / elapsed;
 
     let error_count = errors.load(Ordering::SeqCst);
 
@@ -229,7 +282,6 @@ fn verify_fixed_index(
     backup_dir: &BackupDir,
     info: &FileInfo,
 ) -> Result<(), Error> {
-
     let mut path = backup_dir.relative_path();
     path.push(&info.filename);
 
@@ -244,11 +296,7 @@ fn verify_fixed_index(
         bail!("wrong index checksum");
     }
 
-    verify_index_chunks(
-        verify_worker,
-        Box::new(index),
-        info.chunk_crypt_mode(),
-    )
+    verify_index_chunks(verify_worker, Box::new(index), info.chunk_crypt_mode())
 }
 
 fn verify_dynamic_index(
@@ -256,7 +304,6 @@ fn verify_dynamic_index(
     backup_dir: &BackupDir,
     info: &FileInfo,
 ) -> Result<(), Error> {
-
     let mut path = backup_dir.relative_path();
     path.push(&info.filename);
 
@@ -271,11 +318,7 @@ fn verify_dynamic_index(
         bail!("wrong index checksum");
     }
 
-    verify_index_chunks(
-        verify_worker,
-        Box::new(index),
-        info.chunk_crypt_mode(),
-    )
+    verify_index_chunks(verify_worker, Box::new(index), info.chunk_crypt_mode())
 }
 
 /// Verify a single backup snapshot
@@ -296,15 +339,12 @@ pub fn verify_backup_dir(
     let snap_lock = lock_dir_noblock_shared(
         &verify_worker.datastore.snapshot_path(&backup_dir),
         "snapshot",
-        "locked by another operation");
+        "locked by another operation",
+    );
     match snap_lock {
-        Ok(snap_lock) => verify_backup_dir_with_lock(
-            verify_worker,
-            backup_dir,
-            upid,
-            filter,
-            snap_lock
-        ),
+        Ok(snap_lock) => {
+            verify_backup_dir_with_lock(verify_worker, backup_dir, upid, filter, snap_lock)
+        }
         Err(err) => {
             task_log!(
                 verify_worker.worker,
@@ -361,19 +401,11 @@ pub fn verify_backup_dir_with_lock(
         let result = proxmox::try_block!({
             task_log!(verify_worker.worker, "  check {}", info.filename);
             match archive_type(&info.filename)? {
-                ArchiveType::FixedIndex =>
-                    verify_fixed_index(
-                        verify_worker,
-                        &backup_dir,
-                        info,
-                    ),
-                ArchiveType::DynamicIndex =>
-                    verify_dynamic_index(
-                        verify_worker,
-                        &backup_dir,
-                        info,
-                    ),
-                ArchiveType::Blob => verify_blob(verify_worker.datastore.clone(), &backup_dir, info),
+                ArchiveType::FixedIndex => verify_fixed_index(verify_worker, &backup_dir, info),
+                ArchiveType::DynamicIndex => verify_dynamic_index(verify_worker, &backup_dir, info),
+                ArchiveType::Blob => {
+                    verify_blob(verify_worker.datastore.clone(), &backup_dir, info)
+                }
             }
         });
 
@@ -392,7 +424,6 @@ pub fn verify_backup_dir_with_lock(
             error_count += 1;
             verify_result = VerifyState::Failed;
         }
-
     }
 
     let verify_state = SnapshotVerifyState {
@@ -400,9 +431,12 @@ pub fn verify_backup_dir_with_lock(
         upid,
     };
     let verify_state = serde_json::to_value(verify_state)?;
-    verify_worker.datastore.update_manifest(&backup_dir, |manifest| {
-        manifest.unprotected["verify_state"] = verify_state;
-    }).map_err(|err| format_err!("unable to update manifest blob - {}", err))?;
+    verify_worker
+        .datastore
+        .update_manifest(&backup_dir, |manifest| {
+            manifest.unprotected["verify_state"] = verify_state;
+        })
+        .map_err(|err| format_err!("unable to update manifest blob - {}", err))?;
 
     Ok(error_count == 0)
 }
@@ -421,7 +455,6 @@ pub fn verify_backup_group(
     upid: &UPID,
     filter: Option<&dyn Fn(&BackupManifest) -> bool>,
 ) -> Result<Vec<String>, Error> {
-
     let mut errors = Vec::new();
     let mut list = match group.list_backups(&verify_worker.datastore.base_path()) {
         Ok(list) => list,
@@ -438,26 +471,23 @@ pub fn verify_backup_group(
     };
 
     let snapshot_count = list.len();
-    task_log!(verify_worker.worker, "verify group {}:{} ({} snapshots)", verify_worker.datastore.name(), group, snapshot_count);
+    task_log!(
+        verify_worker.worker,
+        "verify group {}:{} ({} snapshots)",
+        verify_worker.datastore.name(),
+        group,
+        snapshot_count
+    );
 
     progress.group_snapshots = snapshot_count as u64;
 
     BackupInfo::sort_list(&mut list, false); // newest first
     for (pos, info) in list.into_iter().enumerate() {
-        if !verify_backup_dir(
-            verify_worker,
-            &info.backup_dir,
-            upid.clone(),
-            filter,
-        )? {
+        if !verify_backup_dir(verify_worker, &info.backup_dir, upid.clone(), filter)? {
             errors.push(info.backup_dir.to_string());
         }
         progress.done_snapshots = pos as u64 + 1;
-        task_log!(
-            verify_worker.worker,
-            "percentage done: {}",
-            progress
-        );
+        task_log!(verify_worker.worker, "percentage done: {}", progress);
     }
 
     Ok(errors)
@@ -521,11 +551,7 @@ pub fn verify_all_backups(
             .filter(filter_by_owner)
             .collect::<Vec<BackupGroup>>(),
         Err(err) => {
-            task_log!(
-                worker,
-                "unable to list backups: {}",
-                err,
-            );
+            task_log!(worker, "unable to list backups: {}", err,);
             return Ok(errors);
         }
     };
@@ -542,13 +568,8 @@ pub fn verify_all_backups(
         progress.done_snapshots = 0;
         progress.group_snapshots = 0;
 
-        let mut group_errors = verify_backup_group(
-            verify_worker,
-            &group,
-            &mut progress,
-            upid,
-            filter,
-        )?;
+        let mut group_errors =
+            verify_backup_group(verify_worker, &group, &mut progress, upid, filter)?;
         errors.append(&mut group_errors);
     }
 

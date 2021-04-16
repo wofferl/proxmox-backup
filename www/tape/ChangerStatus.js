@@ -138,15 +138,35 @@ Ext.define('PBS.TapeManagement.ChangerStatus', {
 	    });
 	},
 
-	erase: function(v, rI, cI, button, el, record) {
+	'format-inserted': function(button, event, record) {
+	    let me = this;
+
+	    let view = me.getView();
+	    PBS.Utils.driveCommand(record.data.name, 'format-media', {
+		waitMsgTarget: view,
+		method: 'POST',
+		success: function(response) {
+		    Ext.create('Proxmox.window.TaskProgress', {
+			upid: response.result.data,
+			taskDone: function() {
+			    me.reload();
+			},
+		    }).show();
+		},
+	    });
+	},
+
+	format: function(v, rI, cI, button, el, record) {
 	    let me = this;
 	    let view = me.getView();
 	    let label = record.data['label-text'];
 
 	    let changer = encodeURIComponent(view.changer);
+	    let singleDrive = me.drives.length === 1 ? me.drives[0] : undefined;
 	    Ext.create('PBS.TapeManagement.EraseWindow', {
 		label,
 		changer,
+		singleDrive,
 		listeners: {
 		    destroy: function() {
 			me.reload();
@@ -161,40 +181,62 @@ Ext.define('PBS.TapeManagement.ChangerStatus', {
 	    let label = record.data['label-text'];
 
 	    let changer = encodeURIComponent(view.changer);
+	    let singleDrive = me.drives.length === 1 ? me.drives[0] : undefined;
 
-	    Ext.create('Proxmox.window.Edit', {
-		isCreate: true,
-		autoShow: true,
-		submitText: gettext('OK'),
-		title: gettext('Load Media into Drive'),
-		url: `/api2/extjs/tape/drive`,
-		method: 'POST',
-		submitUrl: function(url, values) {
-		    let drive = values.drive;
-		    delete values.drive;
-		    return `${url}/${encodeURIComponent(drive)}/load-media`;
-		},
-		items: [
-		    {
-			xtype: 'displayfield',
-			name: 'label-text',
-			value: label,
-			submitValue: true,
-			fieldLabel: gettext('Media'),
+	    if (singleDrive !== undefined) {
+		Proxmox.Utils.API2Request({
+		    method: 'POST',
+		    params: {
+			'label-text': label,
 		    },
-		    {
-			xtype: 'pbsDriveSelector',
-			fieldLabel: gettext('Drive'),
-			changer: changer,
-			name: 'drive',
+		    url: `/api2/extjs/tape/drive/${singleDrive}/load-media`,
+		    success: function(response, opt) {
+			Ext.create('Proxmox.window.TaskProgress', {
+			    upid: response.result.data,
+			    taskDone: function(success) {
+				me.reload();
+			    },
+			}).show();
 		    },
-		],
-		listeners: {
-		    destroy: function() {
-			me.reload();
+		    failure: function(response, opt) {
+			Ext.Msg.alert(gettext('Error'), response.htmlStatus);
 		    },
-		},
-	    });
+		});
+	    } else {
+		Ext.create('Proxmox.window.Edit', {
+		    isCreate: true,
+		    autoShow: true,
+		    submitText: gettext('OK'),
+		    title: gettext('Load Media into Drive'),
+		    url: `/api2/extjs/tape/drive`,
+		    method: 'POST',
+		    submitUrl: function(url, values) {
+			let drive = values.drive;
+			delete values.drive;
+			return `${url}/${encodeURIComponent(drive)}/load-media`;
+		    },
+		    items: [
+			{
+			    xtype: 'displayfield',
+			    name: 'label-text',
+			    value: label,
+			    submitValue: true,
+			    fieldLabel: gettext('Media'),
+			},
+			{
+			    xtype: 'pbsDriveSelector',
+			    fieldLabel: gettext('Drive'),
+			    changer: changer,
+			    name: 'drive',
+			},
+		    ],
+		    listeners: {
+			destroy: function() {
+			    me.reload();
+			},
+		    },
+		});
+	    }
 	},
 
 	unload: async function(v, rI, cI, button, el, record) {
@@ -278,6 +320,8 @@ Ext.define('PBS.TapeManagement.ChangerStatus', {
 		return;
 	    }
 
+	    let singleDrive = me.drives.length === 1 ? me.drives[0] : undefined;
+
 	    Ext.create('Proxmox.window.Edit', {
 		title: gettext('Barcode Label'),
 		showTaskViewer: true,
@@ -291,9 +335,11 @@ Ext.define('PBS.TapeManagement.ChangerStatus', {
 
 		items: [
 		    {
-			xtype: 'pbsDriveSelector',
+			xtype: singleDrive === undefined ? 'pbsDriveSelector' : 'displayfield',
 			fieldLabel: gettext('Drive'),
+			submitValue: true,
 			name: 'drive',
+			value: singleDrive,
 			changer: changer,
 		    },
 		    {
@@ -315,26 +361,46 @@ Ext.define('PBS.TapeManagement.ChangerStatus', {
 		return;
 	    }
 
-	    Ext.create('Proxmox.window.Edit', {
-		title: gettext('Inventory'),
-		showTaskViewer: true,
-		method: 'PUT',
-		url: '/api2/extjs/tape/drive',
-		submitUrl: function(url, values) {
-		    let drive = values.drive;
-		    delete values.drive;
-		    return `${url}/${encodeURIComponent(drive)}/inventory`;
-		},
+	    let singleDrive = me.drives.length === 1 ? me.drives[0] : undefined;
 
-		items: [
-		    {
-			xtype: 'pbsDriveSelector',
-			fieldLabel: gettext('Drive'),
-			name: 'drive',
-			changer: changer,
+	    if (singleDrive !== undefined) {
+		Proxmox.Utils.API2Request({
+		    method: 'PUT',
+		    url: `/api2/extjs/tape/drive/${singleDrive}/inventory`,
+		    success: function(response, opt) {
+			Ext.create('Proxmox.window.TaskViewer', {
+			    upid: response.result.data,
+			    taskDone: function(success) {
+				me.reload();
+			    },
+			}).show();
 		    },
-		],
-	    }).show();
+		    failure: function(response, opt) {
+			Ext.Msg.alert(gettext('Error'), response.htmlStatus);
+		    },
+		});
+	    } else {
+		Ext.create('Proxmox.window.Edit', {
+		    title: gettext('Inventory'),
+		    showTaskViewer: true,
+		    method: 'PUT',
+		    url: '/api2/extjs/tape/drive',
+		    submitUrl: function(url, values) {
+			let drive = values.drive;
+			delete values.drive;
+			return `${url}/${encodeURIComponent(drive)}/inventory`;
+		    },
+
+		    items: [
+			{
+			    xtype: 'pbsDriveSelector',
+			    fieldLabel: gettext('Drive'),
+			    name: 'drive',
+			    changer: changer,
+			},
+		    ],
+		}).show();
+	    }
 	},
 
 	scheduleReload: function(time) {
@@ -369,7 +435,15 @@ Ext.define('PBS.TapeManagement.ChangerStatus', {
 	    me.reload_full(false);
 	},
 
+	drives: [],
+
+	updateDrives: function(drives) {
+	    let me = this;
+	    me.drives = drives;
+	},
+
 	free_slots: [],
+	free_ie_slots: [],
 
 	updateFreeSlots: function(free_slots, free_ie_slots) {
 	    let me = this;
@@ -439,11 +513,19 @@ Ext.define('PBS.TapeManagement.ChangerStatus', {
 		let free_slots = [];
 		let free_ie_slots = [];
 
+		let valid_drives = [];
+
 		for (let entry of status.result.data) {
 		    let type = entry['entry-kind'];
+		    let id = entry['entry-id'];
 
-		    if (type === 'drive' && drive_entries[entry['entry-id']] !== undefined) {
-			entry = Ext.applyIf(entry, drive_entries[entry['entry-id']]);
+		    if (type === 'drive') {
+			if (drive_entries[id] === undefined) {
+			    continue;
+			}
+
+			entry = Ext.applyIf(entry, drive_entries[id]);
+			valid_drives.push(drive_entries[id].name);
 		    }
 
 		    if (tapes[entry['label-text']] !== undefined) {
@@ -457,12 +539,12 @@ Ext.define('PBS.TapeManagement.ChangerStatus', {
 		    if (!entry['label-text'] && type !== 'drive') {
 			if (type === 'slot') {
 			    free_slots.push({
-				id: entry['entry-id'],
+				id,
 				type,
 			    });
 			} else {
 			    free_ie_slots.push({
-				id: entry['entry-id'],
+				id,
 				type,
 			    });
 			}
@@ -487,6 +569,7 @@ Ext.define('PBS.TapeManagement.ChangerStatus', {
 		me.lookup('drives').getSelectionModel().fireEvent('selectionchange', me);
 
 		me.updateFreeSlots(free_slots, free_ie_slots);
+		me.updateDrives(valid_drives);
 
 		if (!use_cache) {
 		    Proxmox.Utils.setErrorMask(view);
@@ -642,8 +725,8 @@ Ext.define('PBS.TapeManagement.ChangerStatus', {
 				},
 				{
 				    iconCls: 'fa fa-trash-o',
-				    handler: 'erase',
-				    tooltip: gettext('Erase'),
+				    handler: 'format',
+				    tooltip: gettext('Format'),
 				    isDisabled: (v, r, c, i, rec) => !rec.data['label-text'],
 				},
 				{
@@ -692,6 +775,17 @@ Ext.define('PBS.TapeManagement.ChangerStatus', {
 				    disabled: true,
 				    enableFn: (rec) => rec.data["label-text"] !== undefined,
 				},
+				{
+				    text: gettext('Format'),
+				    xtype: 'proxmoxButton',
+				    handler: 'format-inserted',
+				    iconCls: 'fa fa-trash-o',
+				    disabled: true,
+				    enableFn: (rec) => rec.data["label-text"] !== undefined,
+				    dangerous: true,
+				    confirmMsg: gettext('Are you sure you want to format the inserted tape?'),
+				},
+				'-',
 				{
 				    text: gettext('Clean Drive'),
 				    xtype: 'proxmoxButton',

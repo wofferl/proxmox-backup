@@ -70,6 +70,7 @@ use crate::{
     tape::{
         TAPE_STATUS_DIR,
         TapeRead,
+        BlockReadError,
         MediaId,
         MediaSet,
         MediaCatalog,
@@ -418,12 +419,19 @@ pub fn restore_media(
 
     loop {
         let current_file_number = drive.current_file_number()?;
-        let reader = match drive.read_next_file()? {
-            None => {
+        let reader = match drive.read_next_file() {
+            Err(BlockReadError::EndOfFile) => {
+                task_log!(worker, "skip unexpected filemark at pos {}", current_file_number);
+                continue;
+            }
+            Err(BlockReadError::EndOfStream) => {
                 task_log!(worker, "detected EOT after {} files", current_file_number);
                 break;
             }
-            Some(reader) => reader,
+            Err(BlockReadError::Error(err)) => {
+                return Err(err.into());
+            }
+            Ok(reader) => reader,
         };
 
         restore_archive(worker, reader, current_file_number, target, &mut catalog, verbose)?;
@@ -517,7 +525,7 @@ fn restore_archive<'a>(
                 }
             }
 
-            reader.skip_to_end()?; // read all data
+            reader.skip_data()?; // read all data
             if let Ok(false) = reader.is_incomplete() {
                 catalog.register_snapshot(Uuid::from(header.uuid), current_file_number, &datastore_name, &snapshot)?;
                 catalog.commit_if_large()?;
@@ -558,7 +566,7 @@ fn restore_archive<'a>(
                 task_log!(worker, "skipping...");
             }
 
-            reader.skip_to_end()?; // read all data
+            reader.skip_data()?; // read all data
         }
         PROXMOX_BACKUP_CATALOG_ARCHIVE_MAGIC_1_0 => {
             let header_data = reader.read_exact_allocated(header.size as usize)?;
@@ -568,7 +576,7 @@ fn restore_archive<'a>(
 
             task_log!(worker, "File {}: skip catalog '{}'", current_file_number, archive_header.uuid);
 
-            reader.skip_to_end()?; // read all data
+            reader.skip_data()?; // read all data
         }
          _ =>  bail!("unknown content magic {:?}", header.content_magic),
     }
@@ -589,54 +597,53 @@ fn restore_chunk_archive<'a>(
 
     let mut decoder = ChunkArchiveDecoder::new(reader);
 
-    let result: Result<_, Error> = proxmox::try_block!({
-        while let Some((digest, blob)) = decoder.next_chunk()? {
+    loop {
+        let (digest, blob) = match decoder.next_chunk() {
+            Ok(Some((digest, blob))) => (digest, blob),
+            Ok(None) => break,
+            Err(err) => {
+                let reader = decoder.reader();
 
-            worker.check_abort()?;
-
-            if let Some(datastore) = datastore {
-                let chunk_exists = datastore.cond_touch_chunk(&digest, false)?;
-                if !chunk_exists {
-                    blob.verify_crc()?;
-
-                    if blob.crypt_mode()? == CryptMode::None {
-                        blob.decode(None, Some(&digest))?; // verify digest
-                    }
-                    if verbose {
-                        task_log!(worker, "Insert chunk: {}", proxmox::tools::digest_to_hex(&digest));
-                    }
-                    datastore.insert_chunk(&blob, &digest)?;
-                } else if verbose {
-                    task_log!(worker, "Found existing chunk: {}", proxmox::tools::digest_to_hex(&digest));
+                // check if this stream is marked incomplete
+                if let Ok(true) = reader.is_incomplete() {
+                    return Ok(Some(chunks));
                 }
+
+                // check if this is an aborted stream without end marker
+                if let Ok(false) = reader.has_end_marker() {
+                    worker.log("missing stream end marker".to_string());
+                    return Ok(None);
+                }
+
+                // else the archive is corrupt
+                return Err(err);
+            }
+        };
+
+        worker.check_abort()?;
+
+        if let Some(datastore) = datastore {
+            let chunk_exists = datastore.cond_touch_chunk(&digest, false)?;
+            if !chunk_exists {
+                blob.verify_crc()?;
+
+                if blob.crypt_mode()? == CryptMode::None {
+                    blob.decode(None, Some(&digest))?; // verify digest
+                }
+                if verbose {
+                    task_log!(worker, "Insert chunk: {}", proxmox::tools::digest_to_hex(&digest));
+                }
+                datastore.insert_chunk(&blob, &digest)?;
             } else if verbose {
-                task_log!(worker, "Found chunk: {}", proxmox::tools::digest_to_hex(&digest));
+                task_log!(worker, "Found existing chunk: {}", proxmox::tools::digest_to_hex(&digest));
             }
-            chunks.push(digest);
+        } else if verbose {
+            task_log!(worker, "Found chunk: {}", proxmox::tools::digest_to_hex(&digest));
         }
-        Ok(())
-    });
-
-    match result {
-        Ok(()) => Ok(Some(chunks)),
-        Err(err) => {
-            let reader = decoder.reader();
-
-            // check if this stream is marked incomplete
-            if let Ok(true) = reader.is_incomplete() {
-                return Ok(Some(chunks));
-            }
-
-            // check if this is an aborted stream without end marker
-            if let Ok(false) = reader.has_end_marker() {
-                worker.log("missing stream end marker".to_string());
-                return Ok(None);
-            }
-
-            // else the archive is corrupt
-            Err(err)
-        }
+        chunks.push(digest);
     }
+
+    Ok(Some(chunks))
 }
 
 fn restore_snapshot_archive<'a>(
@@ -811,12 +818,19 @@ pub fn fast_catalog_restore(
         let current_file_number = drive.current_file_number()?;
 
         { // limit reader scope
-            let mut reader = match drive.read_next_file()? {
-                None => {
+            let mut reader = match drive.read_next_file() {
+                Err(BlockReadError::EndOfFile) => {
+                    task_log!(worker, "skip unexpected filemark at pos {}", current_file_number);
+                    continue;
+                }
+                Err(BlockReadError::EndOfStream) => {
                     task_log!(worker, "detected EOT after {} files", current_file_number);
                     break;
                 }
-                Some(reader) => reader,
+                Err(BlockReadError::Error(err)) => {
+                    return Err(err.into());
+                }
+                Ok(reader) => reader,
             };
 
             let header: MediaContentHeader = unsafe { reader.read_le_value()? };
@@ -834,7 +848,7 @@ pub fn fast_catalog_restore(
 
                 if &archive_header.media_set_uuid != media_set.uuid() {
                     task_log!(worker, "skipping unrelated catalog at pos {}", current_file_number);
-                    reader.skip_to_end()?; // read all data
+                    reader.skip_data()?; // read all data
                     continue;
                 }
 
@@ -853,7 +867,7 @@ pub fn fast_catalog_restore(
 
                 if !wanted {
                     task_log!(worker, "skip catalog because media '{}' not inventarized", catalog_uuid);
-                    reader.skip_to_end()?; // read all data
+                    reader.skip_data()?; // read all data
                     continue;
                 }
 
@@ -863,7 +877,7 @@ pub fn fast_catalog_restore(
                     // only restore if catalog does not exist
                     if MediaCatalog::exists(status_path, catalog_uuid) {
                         task_log!(worker, "catalog for media '{}' already exists", catalog_uuid);
-                        reader.skip_to_end()?; // read all data
+                        reader.skip_data()?; // read all data
                         continue;
                     }
                 }

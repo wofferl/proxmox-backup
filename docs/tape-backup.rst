@@ -4,12 +4,11 @@ Tape Backup
 ===========
 
 .. CAUTION:: Tape Backup is a technical preview feature, not meant for
-   production use. To enable it in the GUI, you need to issue the
-   following command (as root user on the console):
+   production use.
 
-   .. code-block:: console
-
-     # touch /etc/proxmox-backup/tape.cfg
+.. image:: images/screenshots/pbs-gui-tape-changer-overview.png
+  :align: right
+  :alt: Tape Backup: Tape changer overview
 
 Proxmox tape backup provides an easy way to store datastore content
 onto magnetic tapes. This increases data safety because you get:
@@ -59,7 +58,7 @@ In general, LTO tapes offer the following advantages:
 - Cold Media
 - Movable (storable inside vault)
 - Multiple vendors (for both media and drives)
-- Build in AES-GCM Encryption engine
+- Built in AES-GCM Encryption engine
 
 Note that `Proxmox Backup Server` already stores compressed data, so using the
 tape compression feature has no advantage.
@@ -69,12 +68,16 @@ Supported Hardware
 ------------------
 
 Proxmox Backup Server supports `Linear Tape-Open`_ generation 4 (LTO-4)
-or later. In general, all SCSI-2 tape drives supported by the Linux
-kernel should work, but features like hardware encryption need LTO-4
 or later.
 
-Tape changing is carried out using the Linux 'mtx' command line
-tool, so any changer device supported by this tool should work.
+Tape changing is carried out using the SCSI Medium Changer protocol,
+so all modern tape libraries should work.
+
+.. Note:: We use a custom user space tape driver written in Rust_. This
+   driver directly communicates with the tape drive using the SCSI
+   generic interface. This may have negative side effects when used with the old
+   Linux kernel tape driver, so you should not use that driver with
+   Proxmox tape backup.
 
 
 Drive Performance
@@ -84,7 +87,7 @@ Current LTO-8 tapes provide read/write speeds of up to 360 MB/s. This means,
 that it still takes a minimum of 9 hours to completely write or
 read a single tape (even at maximum speed).
 
-The only way to speed up that data rate is to use more than one
+The only way to speed that data rate up is to use more than one
 drive. That way, you can run several backup jobs in parallel, or run
 restore jobs while the other dives are used for backups.
 
@@ -93,15 +96,16 @@ Also consider that you first need to read data from your datastore
 rate. We measured a maximum rate of about 60MB/s to 100MB/s in practice,
 so it takes 33 hours to read the 12TB needed to fill up an LTO-8 tape. If you want
 to write to your tape at full speed, please make sure that the source
-datastore is able to deliver that performance (e.g, by using SSDs).
+datastore is able to deliver that performance (for example, by using SSDs).
 
 
 Terminology
 -----------
 
-:Tape Labels: are used to uniquely identify a tape. You would normally apply a
-   sticky paper label to the front of the cartridge. We additionally store the
-   label text magnetically on the tape (first file on tape).
+**Tape Labels:**
+  are used to uniquely identify a tape. You would normally apply a
+  sticky paper label to the front of the cartridge. We additionally
+  store the label text magnetically on the tape (first file on tape).
 
 .. _Code 39: https://en.wikipedia.org/wiki/Code_39
 
@@ -109,51 +113,59 @@ Terminology
 
 .. _LTO Barcode Generator: lto-barcode/index.html
 
-:Barcodes: are a special form of tape labels, which are electronically
-   readable. Most LTO tape robots use an 8 character string encoded as
-   `Code 39`_, as defined in the `LTO Ultrium Cartridge Label
-   Specification`_.
+**Barcodes:**
+  are a special form of tape labels, which are electronically
+  readable. Most LTO tape robots use an 8 character string encoded as
+  `Code 39`_, as defined in the `LTO Ultrium Cartridge Label
+  Specification`_.
 
-   You can either buy such barcode labels from your cartridge vendor,
-   or print them yourself. You can use our `LTO Barcode Generator`_
-   app, if you would like to print them yourself.
+  You can either buy such barcode labels from your cartridge vendor,
+  or print them yourself. You can use our `LTO Barcode Generator`_
+  app, if you would like to print them yourself.
 
-.. Note:: Physical labels and the associated adhesive should have an
-   environmental performance to match or exceed the environmental
-   specifications of the cartridge to which it is applied.
+  .. Note:: Physical labels and the associated adhesive should have an
+     environmental performance to match or exceed the environmental
+     specifications of the cartridge to which it is applied.
 
-:Media Pools: A media pool is a logical container for tapes. A backup
-   job targets one media pool, so a job only uses tapes from that
-   pool. The pool additionally defines how long a backup job can
-   append data to tapes (allocation policy) and how long you want to
-   keep the data (retention policy).
+**Media Pools:**
+  A media pool is a logical container for tapes. A backup job targets
+  one media pool, so a job only uses tapes from that pool. The pool
+  additionally defines how long a backup job can append data to tapes
+  (allocation policy) and how long you want to keep the data
+  (retention policy).
 
-:Media Set: A group of continuously written tapes (all from the same
-   media pool).
+**Media Set:**
+  A group of continuously written tapes (all from the same media pool).
 
-:Tape drive: The device used to read and write data to the tape. There
-   are standalone drives, but drives are usually shipped within tape libraries.
+**Tape drive:**
+  The device used to read and write data to the tape. There are
+  standalone drives, but drives are usually shipped within tape
+  libraries.
 
-:Tape changer: A device which can change the tapes inside a tape drive
-   (tape robot). They are usually part of a tape library.
+**Tape changer:**
+  A device which can change the tapes inside a tape drive (tape
+  robot). They are usually part of a tape library.
 
 .. _Tape Library: https://en.wikipedia.org/wiki/Tape_library
 
-:`Tape library`_: A storage device that contains one or more tape drives,
-   a number of slots to hold tape cartridges, a barcode reader to
-   identify tape cartridges, and an automated method for loading tapes
-   (a robot).
+`Tape library`_:
+  A storage device that contains one or more tape drives, a number of
+  slots to hold tape cartridges, a barcode reader to identify tape
+  cartridges, and an automated method for loading tapes (a robot).
 
-   This is also commonly known as an 'autoloader', 'tape robot' or 'tape jukebox'.
+  This is also commonly known as an 'autoloader', 'tape robot' or
+  'tape jukebox'.
 
-:Inventory: The inventory stores the list of known tapes (with
-   additional status information).
+**Inventory:**
+  The inventory stores the list of known tapes (with additional status
+  information).
 
-:Catalog: A media catalog stores information about the media content.
+**Catalog:**
+  A media catalog stores information about the media content.
 
 
 Tape Quick Start
----------------
+----------------
 
 1. Configure your tape hardware (drives and changers)
 
@@ -176,8 +188,15 @@ same configuration.
 Tape changers
 ~~~~~~~~~~~~~
 
-Tape changers (robots) are part of a `Tape Library`_. You can skip
-this step if you are using a standalone drive.
+.. image:: images/screenshots/pbs-gui-tape-changers.png
+  :align: right
+  :alt: Tape Backup: Tape Changers
+
+Tape changers (robots) are part of a `Tape Library`_. They contain a number of
+slots to hold tape cartridges, a barcode reader to identify tape cartridges and
+an automated method for loading tapes.
+
+You can skip this step if you are using a standalone drive.
 
 Linux is able to auto detect these devices, and you can get a list
 of available devices using:
@@ -204,6 +223,13 @@ Where ``sl3`` is an arbitrary name you can choose.
    ``/dev/tape/by-id/``. Names like ``/dev/sg0`` may point to a
    different device after reboot, and that is not what you want.
 
+.. image:: images/screenshots/pbs-gui-tape-changers-add.png
+  :align: right
+  :alt: Tape Backup: Add a new tape changer
+
+This operation can also be carried out from the GUI, by navigating to the
+**Changers** tab of **Tape Backup** and clicking **Add**.
+
 You can display the final configuration with:
 
 .. code-block:: console
@@ -217,7 +243,8 @@ You can display the final configuration with:
  │ path │ /dev/tape/by-id/scsi-CC2C52 │
  └──────┴─────────────────────────────┘
 
-Or simply list all configured changer devices:
+Or simply list all configured changer devices (as seen in the **Changers** tab
+of the GUI):
 
 .. code-block:: console
 
@@ -228,7 +255,7 @@ Or simply list all configured changer devices:
  │ sl3  │ /dev/tape/by-id/scsi-CC2C52 │ Quantum │ Superloader3 │ CC2C52     │
  └──────┴─────────────────────────────┴─────────┴──────────────┴────────────┘
 
-The Vendor, Model and Serial number are auto detected, but only shown
+The Vendor, Model and Serial number are auto-detected, but only shown
 if the device is online.
 
 To test your setup, please query the status of the changer device with:
@@ -261,12 +288,12 @@ It's worth noting that some of the smaller tape libraries don't have
 such slots. While they have something called a "Mail Slot", that slot
 is just a way to grab the tape from the gripper. They are unable
 to hold media while the robot does other things. They also do not
-expose that "Mail Slot" over the SCSI interface, so you wont see them in
+expose that "Mail Slot" over the SCSI interface, so you won't see them in
 the status output.
 
 As a workaround, you can mark some of the normal slots as export
 slot. The software treats those slots like real ``import-export``
-slots, and the media inside those slots is considered to be 'offline'
+slots, and the media inside those slots are considered to be 'offline'
 (not available for backup):
 
 .. code-block:: console
@@ -302,6 +329,10 @@ the status output:
 Tape drives
 ~~~~~~~~~~~
 
+.. image:: images/screenshots/pbs-gui-tape-drives.png
+  :align: right
+  :alt: Tape Backup: Drive list
+
 Linux is able to auto detect tape drives, and you can get a list
 of available tape drives using:
 
@@ -311,18 +342,23 @@ of available tape drives using:
  ┌────────────────────────────────┬────────┬─────────────┬────────┐
  │ path                           │ vendor │ model       │ serial │
  ╞════════════════════════════════╪════════╪═════════════╪════════╡
- │ /dev/tape/by-id/scsi-12345-nst │ IBM    │ ULT3580-TD4 │  12345 │
+ │ /dev/tape/by-id/scsi-12345-sg  │ IBM    │ ULT3580-TD4 │  12345 │
  └────────────────────────────────┴────────┴─────────────┴────────┘
 
+.. image:: images/screenshots/pbs-gui-tape-drives-add.png
+  :align: right
+  :alt: Tape Backup: Add a tape drive
+
 In order to use that drive with Proxmox, you need to create a
-configuration entry:
+configuration entry. This can be done through **Tape Backup -> Drives** in the
+GUI or by using the command below:
 
 .. code-block:: console
 
- # proxmox-tape drive create mydrive --path  /dev/tape/by-id/scsi-12345-nst
+ # proxmox-tape drive create mydrive --path  /dev/tape/by-id/scsi-12345-sg
 
 .. Note:: Please use the persistent device path names from inside
-   ``/dev/tape/by-id/``. Names like ``/dev/nst0`` may point to a
+   ``/dev/tape/by-id/``. Names like ``/dev/sg0`` may point to a
    different device after reboot, and that is not what you want.
 
 If you have a tape library, you also need to set the associated
@@ -346,7 +382,7 @@ You can display the final configuration with:
  ╞═════════╪════════════════════════════════╡
  │ name    │ mydrive                        │
  ├─────────┼────────────────────────────────┤
- │ path    │ /dev/tape/by-id/scsi-12345-nst │
+ │ path    │ /dev/tape/by-id/scsi-12345-sg  │
  ├─────────┼────────────────────────────────┤
  │ changer │ sl3                            │
  └─────────┴────────────────────────────────┘
@@ -362,10 +398,10 @@ To list all configured drives use:
  ┌──────────┬────────────────────────────────┬─────────┬────────┬─────────────┬────────┐
  │ name     │ path                           │ changer │ vendor │ model       │ serial │
  ╞══════════╪════════════════════════════════╪═════════╪════════╪═════════════╪════════╡
- │ mydrive  │ /dev/tape/by-id/scsi-12345-nst │ sl3     │ IBM    │ ULT3580-TD4 │ 12345  │
+ │ mydrive  │ /dev/tape/by-id/scsi-12345-sg  │ sl3     │ IBM    │ ULT3580-TD4 │ 12345  │
  └──────────┴────────────────────────────────┴─────────┴────────┴─────────────┴────────┘
 
-The Vendor, Model and Serial number are auto detected, but only shown
+The Vendor, Model and Serial number are auto detected and only shown
 if the device is online.
 
 For testing, you can simply query the drive status with:
@@ -373,13 +409,35 @@ For testing, you can simply query the drive status with:
 .. code-block:: console
 
  # proxmox-tape status --drive mydrive
- ┌───────────┬────────────────────────┐
- │ Name      │ Value                  │
- ╞═══════════╪════════════════════════╡
- │ blocksize │ 0                      │
- ├───────────┼────────────────────────┤
- │ status    │ DRIVE_OPEN | IM_REP_EN │
- └───────────┴────────────────────────┘
+ ┌────────────────┬──────────────────────────┐
+ │ Name           │ Value                    │
+ ╞════════════════╪══════════════════════════╡
+ │ blocksize      │ 0                        │
+ ├────────────────┼──────────────────────────┤
+ │ density        │ LTO4                     │
+ ├────────────────┼──────────────────────────┤
+ │ compression    │ 1                        │
+ ├────────────────┼──────────────────────────┤
+ │ buffer-mode    │ 1                        │
+ ├────────────────┼──────────────────────────┤
+ │ alert-flags    │ (empty)                  │
+ ├────────────────┼──────────────────────────┤
+ │ file-number    │ 0                        │
+ ├────────────────┼──────────────────────────┤
+ │ block-number   │ 0                        │
+ ├────────────────┼──────────────────────────┤
+ │ manufactured   │ Fri Dec 13 01:00:00 2019 │
+ ├────────────────┼──────────────────────────┤
+ │ bytes-written  │ 501.80 GiB               │
+ ├────────────────┼──────────────────────────┤
+ │ bytes-read     │ 4.00 MiB                 │
+ ├────────────────┼──────────────────────────┤
+ │ medium-passes  │ 20                       │
+ ├────────────────┼──────────────────────────┤
+ │ medium-wearout │ 0.12%                    │
+ ├────────────────┼──────────────────────────┤
+ │ volume-mounts  │ 2                        │
+ └────────────────┴──────────────────────────┘
 
 .. NOTE:: Blocksize should always be 0 (variable block size
    mode). This is the default anyway.
@@ -390,8 +448,12 @@ For testing, you can simply query the drive status with:
 Media Pools
 ~~~~~~~~~~~
 
+.. image:: images/screenshots/pbs-gui-tape-pools.png
+  :align: right
+  :alt: Tape Backup: Media Pools
+
 A media pool is a logical container for tapes. A backup job targets
-one media pool, so a job only uses tapes from that pool.
+a single media pool, so a job only uses tapes from that pool.
 
 .. topic:: Media Set
 
@@ -499,7 +561,7 @@ one media pool, so a job only uses tapes from that pool.
       will be double encrypted.
 
    The password protected key is stored on each medium, so that it is
-   possbible to `restore the key <tape_restore_encryption_key_>`_ using 
+   possbible to `restore the key <tape_restore_encryption_key_>`_ using
    the password. Please make sure to remember the password, in case
    you need to restore the key.
 
@@ -510,8 +572,12 @@ one media pool, so a job only uses tapes from that pool.
    if the sources are from different namespaces with conflicting names
    (for example, if the sources are from different Proxmox VE clusters).
 
+.. image:: images/screenshots/pbs-gui-tape-pools-add.png
+  :align: right
+  :alt: Tape Backup: Add a media pool
 
-The following command creates a new media pool:
+To create a new media pool, add one from **Tape Backup -> Media Pools** in the
+GUI, or enter the following command:
 
 .. code-block:: console
 
@@ -520,7 +586,7 @@ The following command creates a new media pool:
  # proxmox-tape pool create daily --drive mydrive
 
 
-Additional option can be set later, using the update command:
+Additional options can be set later, using the update command:
 
 .. code-block:: console
 
@@ -542,6 +608,10 @@ To list all configured pools use:
 
 Tape Backup Jobs
 ~~~~~~~~~~~~~~~~
+
+.. image:: images/screenshots/pbs-gui-tape-backup-jobs.png
+  :align: right
+  :alt: Tape Backup: Tape Backup Jobs
 
 To automate tape backup, you can configure tape backup jobs which
 write datastore content to a media pool, based on a specific time schedule.
@@ -618,6 +688,14 @@ To remove a job, please use:
 
  # proxmox-tape backup-job remove job2
 
+.. image:: images/screenshots/pbs-gui-tape-backup-jobs-add.png
+  :align: right
+  :alt: Tape Backup: Add a backup job
+
+This same functionality also exists in the GUI, under the **Backup Jobs** tab of
+**Tape Backup**, where *Local Datastore* relates to the datastore you want to
+backup and *Media Pool* is the pool to back up to.
+
 
 Administration
 --------------
@@ -633,7 +711,7 @@ variable:
 
 You can then omit the ``--drive`` parameter from the command. If the
 drive has an associated changer device, you may also omit the changer
-parameter from commands that needs a changer device, for example:
+parameter from commands that need a changer device, for example:
 
 .. code-block:: console
 
@@ -707,7 +785,7 @@ can then label all unlabeled tapes with a single command:
 Run Tape Backups
 ~~~~~~~~~~~~~~~~
 
-To manually run a backup job use:
+To manually run a backup job click *Run Now* in the GUI or use the command:
 
 .. code-block:: console
 
@@ -772,7 +850,14 @@ Restore Catalog
 Encryption Key Management
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Creating a new encryption key:
+.. image:: images/screenshots/pbs-gui-tape-crypt-keys.png
+  :align: right
+  :alt: Tape Backup: Encryption Keys
+
+Proxmox Backup Server also provides an interface for handling encryption keys on
+the backup server. Encryption keys can be managed from the **Tape Backup ->
+Encryption Keys** section of the GUI or through the ``proxmox-tape key`` command
+line tool. To create a new encryption key from the command line:
 
 .. code-block:: console
 
@@ -883,78 +968,3 @@ This command does the following:
 - run drive cleaning operation
 
 - unload the cleaning tape (to slot 3)
-
-
-
-Configuration Files
--------------------
-
-``media-pool.cfg``
-~~~~~~~~~~~~~~~~~~
-
-File Format
-^^^^^^^^^^^
-
-.. include:: config/media-pool/format.rst
-
-
-Options
-^^^^^^^
-
-.. include:: config/media-pool/config.rst
-
-
-``tape.cfg``
-~~~~~~~~~~~~
-
-File Format
-^^^^^^^^^^^
-
-.. include:: config/tape/format.rst
-
-
-Options
-^^^^^^^
-
-.. include:: config/tape/config.rst
-
-
-``tape-job.cfg``
-~~~~~~~~~~~~~~~~
-
-File Format
-^^^^^^^^^^^
-
-.. include:: config/tape-job/format.rst
-
-
-Options
-^^^^^^^
-
-.. include:: config/tape-job/config.rst
-
-
-
-Command Syntax
---------------
-
-``proxmox-tape``
-----------------
-
-.. include:: proxmox-tape/synopsis.rst
-
-
-``pmt``
--------
-
-.. include:: pmt/options.rst
-
-....
-
-.. include:: pmt/synopsis.rst
-
-
-``pmtx``
---------
-
-.. include:: pmtx/synopsis.rst

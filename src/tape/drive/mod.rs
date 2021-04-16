@@ -2,22 +2,8 @@
 
 mod virtual_tape;
 
-pub mod linux_mtio;
-
-mod tape_alert_flags;
-pub use tape_alert_flags::*;
-
-mod volume_statistics;
-pub use volume_statistics::*;
-
-mod encryption;
-pub use encryption::*;
-
-mod linux_tape;
-pub use linux_tape::*;
-
-mod mam;
-pub use mam::*;
+mod lto;
+pub use lto::*;
 
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
@@ -49,7 +35,7 @@ use crate::{
     },
     api2::types::{
         VirtualTapeDrive,
-        LinuxTapeDrive,
+        LtoTapeDrive,
     },
     server::{
         send_load_media_email,
@@ -58,7 +44,9 @@ use crate::{
     tape::{
         TapeWrite,
         TapeRead,
+        BlockReadError,
         MediaId,
+        drive::lto::TapeAlertFlags,
         file_formats::{
             PROXMOX_BACKUP_MEDIA_LABEL_MAGIC_1_0,
             PROXMOX_BACKUP_MEDIA_SET_LABEL_MAGIC_1_0,
@@ -84,37 +72,22 @@ pub trait TapeDriver {
 
     /// Move to end of recorded data
     ///
-    /// We assume this flushes the tape write buffer.
-    fn move_to_eom(&mut self) -> Result<(), Error>;
+    /// We assume this flushes the tape write buffer. if
+    /// write_missing_eof is true, we verify that there is a filemark
+    /// at the end. If not, we write one.
+    fn move_to_eom(&mut self, write_missing_eof: bool) -> Result<(), Error>;
 
     /// Move to last file
-    fn move_to_last_file(&mut self) -> Result<(), Error> {
-
-        self.move_to_eom()?;
-
-        if self.current_file_number()? == 0 {
-            bail!("move_to_last_file failed - media contains no data");
-        }
-
-        self.backward_space_count_files(2)?;
-
-        Ok(())
-    }
-
-    /// Forward space count files. The tape is positioned on the first block of the next file.
-    fn forward_space_count_files(&mut self, count: usize) -> Result<(), Error>;
-
-    /// Backward space count files.  The tape is positioned on the last block of the previous file.
-    fn backward_space_count_files(&mut self, count: usize) -> Result<(), Error>;
+    fn move_to_last_file(&mut self) -> Result<(), Error>;
 
     /// Current file number
     fn current_file_number(&mut self) -> Result<u64, Error>;
 
     /// Completely erase the media
-    fn erase_media(&mut self, fast: bool) -> Result<(), Error>;
+    fn format_media(&mut self, fast: bool) -> Result<(), Error>;
 
     /// Read/Open the next file
-    fn read_next_file<'a>(&'a mut self) -> Result<Option<Box<dyn TapeRead + 'a>>, std::io::Error>;
+    fn read_next_file<'a>(&'a mut self) -> Result<Box<dyn TapeRead + 'a>, BlockReadError>;
 
     /// Write/Append a new file
     fn write_file<'a>(&'a mut self) -> Result<Box<dyn TapeWrite + 'a>, std::io::Error>;
@@ -122,11 +95,9 @@ pub trait TapeDriver {
     /// Write label to tape (erase tape content)
     fn label_tape(&mut self, label: &MediaLabel) -> Result<(), Error> {
 
-        self.rewind()?;
-
         self.set_encryption(None)?;
 
-        self.erase_media(true)?;
+        self.format_media(true)?; // this rewinds the tape
 
         let raw = serde_json::to_string_pretty(&serde_json::to_value(&label)?)?;
 
@@ -162,9 +133,17 @@ pub trait TapeDriver {
         self.rewind()?;
 
         let label = {
-            let mut reader = match self.read_next_file()? {
-                None => return Ok((None, None)), // tape is empty
-                Some(reader) => reader,
+            let mut reader = match self.read_next_file() {
+                Err(BlockReadError::EndOfStream) => {
+                    return Ok((None, None)); // tape is empty
+                }
+                Err(BlockReadError::EndOfFile) => {
+                    bail!("got unexpected filemark at BOT");
+                }
+                Err(BlockReadError::Error(err)) => {
+                    return Err(err.into());
+                }
+                Ok(reader) => reader,
             };
 
             let header: MediaContentHeader = unsafe { reader.read_le_value()? };
@@ -185,9 +164,17 @@ pub trait TapeDriver {
         let mut media_id = MediaId { label, media_set_label: None };
 
         // try to read MediaSet label
-        let mut reader = match self.read_next_file()? {
-            None => return Ok((Some(media_id), None)),
-            Some(reader) => reader,
+        let mut reader = match self.read_next_file() {
+            Err(BlockReadError::EndOfStream) => {
+                return Ok((Some(media_id), None));
+            }
+            Err(BlockReadError::EndOfFile) => {
+                bail!("got unexpected filemark after label");
+            }
+            Err(BlockReadError::Error(err)) => {
+                return Err(err.into());
+            }
+            Ok(reader) => reader,
         };
 
         let header: MediaContentHeader = unsafe { reader.read_le_value()? };
@@ -263,8 +250,8 @@ pub fn media_changer(
                     let tape = VirtualTapeDrive::deserialize(config)?;
                     Ok(Some((Box::new(tape), drive.to_string())))
                 }
-                "linux" => {
-                    let drive_config = LinuxTapeDrive::deserialize(config)?;
+                "lto" => {
+                    let drive_config = LtoTapeDrive::deserialize(config)?;
                     match drive_config.changer {
                         Some(ref changer_name) => {
                             let changer = MtxMediaChanger::with_drive_config(&drive_config)?;
@@ -317,8 +304,8 @@ pub fn open_drive(
                     let handle = tape.open()?;
                     Ok(Box::new(handle))
                 }
-                "linux" => {
-                    let tape = LinuxTapeDrive::deserialize(config)?;
+                "lto" => {
+                    let tape = LtoTapeDrive::deserialize(config)?;
                     let handle = tape.open()?;
                     Ok(Box::new(handle))
                 }
@@ -379,8 +366,8 @@ pub fn request_and_load_media(
 
                     Ok((handle, media_id))
                 }
-                "linux" => {
-                    let drive_config = LinuxTapeDrive::deserialize(config)?;
+                "lto" => {
+                    let drive_config = LtoTapeDrive::deserialize(config)?;
 
                     let label_text = label.label_text.clone();
 
@@ -546,8 +533,8 @@ fn tape_device_path(
                 "virtual" => {
                     VirtualTapeDrive::deserialize(config)?.path
                 }
-                "linux" => {
-                    LinuxTapeDrive::deserialize(config)?.path
+                "lto" => {
+                    LtoTapeDrive::deserialize(config)?.path
                 }
                 _ => bail!("unknown drive type '{}' - internal error"),
             };

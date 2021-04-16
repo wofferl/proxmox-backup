@@ -15,6 +15,7 @@ use crate::{
     tape::{
         TapeWrite,
         TapeRead,
+        BlockReadError,
         changer::{
             MediaChange,
             MtxStatus,
@@ -181,6 +182,53 @@ impl VirtualTapeHandle {
         Ok(list)
     }
 
+    #[allow(dead_code)]
+    fn forward_space_count_files(&mut self, count: usize) -> Result<(), Error> {
+        let mut status = self.load_status()?;
+        match status.current_tape {
+            Some(VirtualTapeStatus { ref name, ref mut pos }) => {
+
+                let index = self.load_tape_index(name)
+                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+
+                let new_pos = *pos + count;
+                if new_pos <= index.files {
+                    *pos = new_pos;
+                } else {
+                    bail!("forward_space_count_files failed: move beyond EOT");
+                }
+
+                self.store_status(&status)
+                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+
+                Ok(())
+            }
+            None => bail!("drive is empty (no tape loaded)."),
+        }
+    }
+
+    // Note: behavior differs from LTO, because we always position at
+    // EOT side.
+    fn backward_space_count_files(&mut self, count: usize) -> Result<(), Error> {
+        let mut status = self.load_status()?;
+        match status.current_tape {
+            Some(VirtualTapeStatus { ref mut pos, .. }) => {
+
+                if count <= *pos {
+                    *pos = *pos - count;
+                } else {
+                    bail!("backward_space_count_files failed: move before BOT");
+                }
+
+                self.store_status(&status)
+                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+
+                Ok(())
+            }
+            None => bail!("drive is empty (no tape loaded)."),
+        }
+    }
+
 }
 
 impl TapeDriver for VirtualTapeHandle {
@@ -199,18 +247,33 @@ impl TapeDriver for VirtualTapeHandle {
         }
     }
 
-    fn read_next_file(&mut self) -> Result<Option<Box<dyn TapeRead>>, io::Error> {
+    /// Move to last file
+    fn move_to_last_file(&mut self) -> Result<(), Error> {
+
+        self.move_to_eom(false)?;
+
+        if self.current_file_number()? == 0 {
+            bail!("move_to_last_file failed - media contains no data");
+        }
+
+        self.backward_space_count_files(1)?;
+
+        Ok(())
+    }
+
+
+    fn read_next_file(&mut self) -> Result<Box<dyn TapeRead>, BlockReadError> {
         let mut status = self.load_status()
-            .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+            .map_err(|err| BlockReadError::Error(io::Error::new(io::ErrorKind::Other, err.to_string())))?;
 
         match status.current_tape {
             Some(VirtualTapeStatus { ref name, ref mut pos }) => {
 
                 let index = self.load_tape_index(name)
-                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+                    .map_err(|err| BlockReadError::Error(io::Error::new(io::ErrorKind::Other, err.to_string())))?;
 
                 if *pos >= index.files {
-                    return Ok(None); // EOM
+                    return Err(BlockReadError::EndOfStream);
                 }
 
                 let path = self.tape_file_path(name, *pos);
@@ -220,17 +283,15 @@ impl TapeDriver for VirtualTapeHandle {
 
                 *pos += 1;
                 self.store_status(&status)
-                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+                    .map_err(|err|  BlockReadError::Error(io::Error::new(io::ErrorKind::Other, err.to_string())))?;
 
-                let reader = Box::new(file);
-                let reader = Box::new(EmulateTapeReader::new(reader));
-
-                match BlockedReader::open(reader)? {
-                    Some(reader) => Ok(Some(Box::new(reader))),
-                    None => Ok(None),
-                }
+                let reader = EmulateTapeReader::new(file);
+                let reader = BlockedReader::open(reader)?;
+                Ok(Box::new(reader))
             }
-            None => proxmox::io_bail!("drive is empty (no tape loaded)."),
+            None => {
+                return Err(BlockReadError::Error(proxmox::io_format_err!("drive is empty (no tape loaded).")));
+            }
         }
     }
 
@@ -277,8 +338,7 @@ impl TapeDriver for VirtualTapeHandle {
                     free_space = self.max_size - used_space;
                 }
 
-                let writer = Box::new(file);
-                let writer = Box::new(EmulateTapeWriter::new(writer, free_space));
+                let writer = EmulateTapeWriter::new(file, free_space);
                 let writer = Box::new(BlockedWriter::new(writer));
 
                 Ok(writer)
@@ -287,7 +347,7 @@ impl TapeDriver for VirtualTapeHandle {
         }
     }
 
-    fn move_to_eom(&mut self) -> Result<(), Error> {
+    fn move_to_eom(&mut self, _write_missing_eof: bool) -> Result<(), Error> {
         let mut status = self.load_status()?;
         match status.current_tape {
             Some(VirtualTapeStatus { ref name, ref mut pos }) => {
@@ -296,50 +356,6 @@ impl TapeDriver for VirtualTapeHandle {
                     .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
 
                 *pos = index.files;
-
-                self.store_status(&status)
-                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
-
-                Ok(())
-            }
-            None => bail!("drive is empty (no tape loaded)."),
-        }
-    }
-
-    fn forward_space_count_files(&mut self, count: usize) -> Result<(), Error> {
-        let mut status = self.load_status()?;
-        match status.current_tape {
-            Some(VirtualTapeStatus { ref name, ref mut pos }) => {
-
-                let index = self.load_tape_index(name)
-                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
-
-                let new_pos = *pos + count;
-                if new_pos <= index.files {
-                    *pos = new_pos;
-                } else {
-                    bail!("forward_space_count_files failed: move beyond EOT");
-                }
-
-                self.store_status(&status)
-                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
-
-                Ok(())
-            }
-            None => bail!("drive is empty (no tape loaded)."),
-        }
-    }
-
-    fn backward_space_count_files(&mut self, count: usize) -> Result<(), Error> {
-        let mut status = self.load_status()?;
-        match status.current_tape {
-            Some(VirtualTapeStatus { ref mut pos, .. }) => {
-
-                if count <= *pos {
-                    *pos = *pos - count;
-                } else {
-                    bail!("backward_space_count_files failed: move before BOT");
-                }
 
                 self.store_status(&status)
                     .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
@@ -362,7 +378,7 @@ impl TapeDriver for VirtualTapeHandle {
         }
     }
 
-    fn erase_media(&mut self, _fast: bool) -> Result<(), Error> {
+    fn format_media(&mut self, _fast: bool) -> Result<(), Error> {
         let mut status = self.load_status()?;
         match status.current_tape {
             Some(VirtualTapeStatus { ref name, ref mut pos }) => {

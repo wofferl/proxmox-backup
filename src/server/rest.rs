@@ -30,15 +30,17 @@ use proxmox::api::{
 };
 use proxmox::http_err;
 
+use super::auth::AuthError;
 use super::environment::RestEnvironment;
 use super::formatter::*;
 use super::ApiConfig;
-use super::auth::{check_auth, extract_auth_data};
 
 use crate::api2::types::{Authid, Userid};
 use crate::auth_helpers::*;
 use crate::config::cached_user_info::CachedUserInfo;
 use crate::tools;
+use crate::tools::compression::{CompressionMethod, DeflateEncoder, Level};
+use crate::tools::AsyncReaderStream;
 use crate::tools::FileLogger;
 
 extern "C" {
@@ -50,6 +52,7 @@ pub struct RestServer {
 }
 
 const MAX_URI_QUERY_LENGTH: usize = 3072;
+const CHUNK_SIZE_LIMIT: u64 = 32 * 1024;
 
 impl RestServer {
     pub fn new(api_config: ApiConfig) -> Self {
@@ -396,6 +399,7 @@ pub async fn handle_api_request<Env: RpcEnvironment, S: 'static + BuildHasher + 
     uri_param: HashMap<String, String, S>,
 ) -> Result<Response<Body>, Error> {
     let delay_unauth_time = std::time::Instant::now() + std::time::Duration::from_millis(3000);
+    let compression = extract_compression_method(&parts.headers);
 
     let result = match info.handler {
         ApiHandler::AsyncHttp(handler) => {
@@ -416,7 +420,7 @@ pub async fn handle_api_request<Env: RpcEnvironment, S: 'static + BuildHasher + 
         }
     };
 
-    let resp = match result {
+    let mut resp = match result {
         Ok(resp) => resp,
         Err(err) => {
             if let Some(httperr) = err.downcast_ref::<HttpError>() {
@@ -426,6 +430,24 @@ pub async fn handle_api_request<Env: RpcEnvironment, S: 'static + BuildHasher + 
             }
             (formatter.format_error)(err)
         }
+    };
+
+    let resp = match compression {
+        Some(CompressionMethod::Deflate) => {
+            resp.headers_mut().insert(
+                header::CONTENT_ENCODING,
+                CompressionMethod::Deflate.content_encoding(),
+            );
+            resp.map(|body| {
+                Body::wrap_stream(DeflateEncoder::with_quality(
+                    body.map_err(|err| {
+                        proxmox::io_format_err!("error during compression: {}", err)
+                    }),
+                    Level::Default,
+                ))
+            })
+        }
+        None => resp,
     };
 
     if info.reload_timezone {
@@ -475,7 +497,6 @@ fn get_index(
         "CSRFPreventionToken": csrf_token,
         "language": lang,
         "debug": debug,
-        "enableTapeUI": api.enable_tape_ui,
     });
 
     let (ct, index) = match api.render_template(template_file, &data) {
@@ -524,9 +545,11 @@ fn extension_to_content_type(filename: &Path) -> (&'static str, bool) {
     ("application/octet-stream", false)
 }
 
-async fn simple_static_file_download(filename: PathBuf) -> Result<Response<Body>, Error> {
-    let (content_type, _nocomp) = extension_to_content_type(&filename);
-
+async fn simple_static_file_download(
+    filename: PathBuf,
+    content_type: &'static str,
+    compression: Option<CompressionMethod>,
+) -> Result<Response<Body>, Error> {
     use tokio::io::AsyncReadExt;
 
     let mut file = File::open(filename)
@@ -534,56 +557,98 @@ async fn simple_static_file_download(filename: PathBuf) -> Result<Response<Body>
         .map_err(|err| http_err!(BAD_REQUEST, "File open failed: {}", err))?;
 
     let mut data: Vec<u8> = Vec::new();
-    file.read_to_end(&mut data)
-        .await
-        .map_err(|err| http_err!(BAD_REQUEST, "File read failed: {}", err))?;
 
-    let mut response = Response::new(data.into());
+    let mut response = match compression {
+        Some(CompressionMethod::Deflate) => {
+            let mut enc = DeflateEncoder::with_quality(data, Level::Default);
+            enc.compress_vec(&mut file, CHUNK_SIZE_LIMIT as usize).await?;
+            let mut response = Response::new(enc.into_inner().into());
+            response.headers_mut().insert(
+                header::CONTENT_ENCODING,
+                CompressionMethod::Deflate.content_encoding(),
+            );
+            response
+        }
+        None => {
+            file.read_to_end(&mut data)
+                .await
+                .map_err(|err| http_err!(BAD_REQUEST, "File read failed: {}", err))?;
+            Response::new(data.into())
+        }
+    };
+
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         header::HeaderValue::from_static(content_type),
     );
+
     Ok(response)
 }
 
-async fn chuncked_static_file_download(filename: PathBuf) -> Result<Response<Body>, Error> {
-    let (content_type, _nocomp) = extension_to_content_type(&filename);
+async fn chuncked_static_file_download(
+    filename: PathBuf,
+    content_type: &'static str,
+    compression: Option<CompressionMethod>,
+) -> Result<Response<Body>, Error> {
+    let mut resp = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type);
 
     let file = File::open(filename)
         .await
         .map_err(|err| http_err!(BAD_REQUEST, "File open failed: {}", err))?;
 
-    let payload = tokio_util::codec::FramedRead::new(file, tokio_util::codec::BytesCodec::new())
-        .map_ok(|bytes| bytes.freeze());
-    let body = Body::wrap_stream(payload);
+    let body = match compression {
+        Some(CompressionMethod::Deflate) => {
+            resp = resp.header(
+                header::CONTENT_ENCODING,
+                CompressionMethod::Deflate.content_encoding(),
+            );
+            Body::wrap_stream(DeflateEncoder::with_quality(
+                AsyncReaderStream::new(file),
+                Level::Default,
+            ))
+        }
+        None => Body::wrap_stream(AsyncReaderStream::new(file)),
+    };
 
-    // FIXME: set other headers ?
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .body(body)
-        .unwrap())
+    Ok(resp.body(body).unwrap())
 }
 
-async fn handle_static_file_download(filename: PathBuf) -> Result<Response<Body>, Error> {
+async fn handle_static_file_download(
+    filename: PathBuf,
+    compression: Option<CompressionMethod>,
+) -> Result<Response<Body>, Error> {
     let metadata = tokio::fs::metadata(filename.clone())
         .map_err(|err| http_err!(BAD_REQUEST, "File access problems: {}", err))
         .await?;
 
-    if metadata.len() < 1024 * 32 {
-        simple_static_file_download(filename).await
+    let (content_type, nocomp) = extension_to_content_type(&filename);
+    let compression = if nocomp { None } else { compression };
+
+    if metadata.len() < CHUNK_SIZE_LIMIT {
+        simple_static_file_download(filename, content_type, compression).await
     } else {
-        chuncked_static_file_download(filename).await
+        chuncked_static_file_download(filename, content_type, compression).await
     }
 }
 
 fn extract_lang_header(headers: &http::HeaderMap) -> Option<String> {
-    if let Some(raw_cookie) = headers.get("COOKIE") {
-        if let Ok(cookie) = raw_cookie.to_str() {
-            return tools::extract_cookie(cookie, "PBSLangCookie");
+    if let Some(Ok(cookie)) = headers.get("COOKIE").map(|v| v.to_str()) {
+        return tools::extract_cookie(cookie, "PBSLangCookie");
+    }
+    None
+}
+
+// FIXME: support handling multiple compression methods
+fn extract_compression_method(headers: &http::HeaderMap) -> Option<CompressionMethod> {
+    if let Some(Ok(encodings)) = headers.get(header::ACCEPT_ENCODING).map(|v| v.to_str()) {
+        for encoding in encodings.split(&[',', ' '][..]) {
+            if let Ok(method) = encoding.parse() {
+                return Some(method);
+            }
         }
     }
-
     None
 }
 
@@ -612,6 +677,7 @@ async fn handle_request(
     rpcenv.set_client_ip(Some(*peer));
 
     let user_info = CachedUserInfo::new()?;
+    let auth = &api.api_auth;
 
     let delay_unauth_time = std::time::Instant::now() + std::time::Duration::from_millis(3000);
     let access_forbidden_time = std::time::Instant::now() + std::time::Duration::from_millis(500);
@@ -637,13 +703,15 @@ async fn handle_request(
             }
 
             if auth_required {
-                let auth_result = match extract_auth_data(&parts.headers) {
-                    Some(auth_data) => check_auth(&method, &auth_data, &user_info),
-                    None => Err(format_err!("no authentication credentials provided.")),
-                };
-                match auth_result {
+                match auth.check_auth(&parts.headers, &method, &user_info) {
                     Ok(authid) => rpcenv.set_auth_id(Some(authid.to_string())),
-                    Err(err) => {
+                    Err(auth_err) => {
+                        let err = match auth_err {
+                            AuthError::Generic(err) => err,
+                            AuthError::NoData => {
+                                format_err!("no authentication credentials provided.")
+                            }
+                        };
                         let peer = peer.ip();
                         auth_logger()?.log(format!(
                             "authentication failure; rhost={} msg={}",
@@ -706,9 +774,9 @@ async fn handle_request(
 
         if comp_len == 0 {
             let language = extract_lang_header(&parts.headers);
-            if let Some(auth_data) = extract_auth_data(&parts.headers) {
-                match check_auth(&method, &auth_data, &user_info) {
-                    Ok(auth_id) if !auth_id.is_token() => {
+            match auth.check_auth(&parts.headers, &method, &user_info) {
+                Ok(auth_id) => {
+                    if !auth_id.is_token() {
                         let userid = auth_id.user();
                         let new_csrf_token = assemble_csrf_prevention_token(csrf_secret(), userid);
                         return Ok(get_index(
@@ -719,17 +787,17 @@ async fn handle_request(
                             parts,
                         ));
                     }
-                    _ => {
-                        tokio::time::sleep_until(Instant::from_std(delay_unauth_time)).await;
-                        return Ok(get_index(None, None, language, &api, parts));
-                    }
                 }
-            } else {
-                return Ok(get_index(None, None, language, &api, parts));
+                Err(AuthError::Generic(_)) => {
+                    tokio::time::sleep_until(Instant::from_std(delay_unauth_time)).await;
+                }
+                Err(AuthError::NoData) => {}
             }
+            return Ok(get_index(None, None, language, &api, parts));
         } else {
             let filename = api.find_alias(&components);
-            return handle_static_file_download(filename).await;
+            let compression = extract_compression_method(&parts.headers);
+            return handle_static_file_download(filename, compression).await;
         }
     }
 
