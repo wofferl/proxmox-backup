@@ -305,11 +305,17 @@ pub fn restore(
                 task_log!(worker, "Encryption key fingerprint: {}", fingerprint);
             }
             task_log!(worker, "Pool: {}", pool);
-            task_log!(worker, "Datastore(s):");
-            store_map
-                .used_datastores()
-                .iter()
-                .for_each(|store| task_log!(worker, "\t{}", store));
+            task_log!(
+                worker,
+                "Datastore(s): {}",
+                store_map
+                    .used_datastores()
+                    .into_iter()
+                    .map(String::from)
+                    .collect::<Vec<String>>()
+                    .join(", "),
+            );
+
             task_log!(worker, "Drive: {}", drive);
             task_log!(
                 worker,
@@ -320,6 +326,17 @@ pub fn restore(
                     .join(";")
             );
 
+            let mut datastore_locks = Vec::new();
+            for store_name in store_map.used_datastores() {
+                // explicit create shared lock to prevent GC on newly created chunks
+                if let Some(store) = store_map.get_datastore(store_name) {
+                    let shared_store_lock = store.try_shared_chunk_store_lock()?;
+                    datastore_locks.push(shared_store_lock);
+                }
+            }
+
+            let mut checked_chunks_map = HashMap::new();
+
             for media_id in media_id_list.iter() {
                 request_and_restore_media(
                     &worker,
@@ -327,11 +344,14 @@ pub fn restore(
                     &drive_config,
                     &drive,
                     &store_map,
+                    &mut checked_chunks_map,
                     &auth_id,
                     &notify_user,
                     &owner,
                 )?;
             }
+
+            drop(datastore_locks);
 
             task_log!(worker, "Restore mediaset '{}' done", media_set);
 
@@ -358,6 +378,7 @@ pub fn request_and_restore_media(
     drive_config: &SectionConfigData,
     drive_name: &str,
     store_map: &DataStoreMap,
+    checked_chunks_map: &mut HashMap<String, HashSet<[u8;32]>>,
     authid: &Authid,
     notify_user: &Option<Userid>,
     owner: &Option<Authid>,
@@ -399,6 +420,7 @@ pub fn request_and_restore_media(
         &mut drive,
         &info,
         Some((&store_map, restore_owner)),
+        checked_chunks_map,
         false,
     )
 }
@@ -411,6 +433,7 @@ pub fn restore_media(
     drive: &mut Box<dyn TapeDriver>,
     media_id: &MediaId,
     target: Option<(&DataStoreMap, &Authid)>,
+    checked_chunks_map: &mut HashMap<String, HashSet<[u8;32]>>,
     verbose: bool,
 ) ->  Result<(), Error> {
 
@@ -434,7 +457,7 @@ pub fn restore_media(
             Ok(reader) => reader,
         };
 
-        restore_archive(worker, reader, current_file_number, target, &mut catalog, verbose)?;
+        restore_archive(worker, reader, current_file_number, target, &mut catalog, checked_chunks_map, verbose)?;
     }
 
     MediaCatalog::finish_temporary_database(status_path, &media_id.label.uuid, true)?;
@@ -448,6 +471,7 @@ fn restore_archive<'a>(
     current_file_number: u64,
     target: Option<(&DataStoreMap, &Authid)>,
     catalog: &mut MediaCatalog,
+    checked_chunks_map: &mut HashMap<String, HashSet<[u8;32]>>,
     verbose: bool,
 ) -> Result<(), Error> {
     let header: MediaContentHeader = unsafe { reader.read_le_value()? };
@@ -472,6 +496,8 @@ fn restore_archive<'a>(
 
             let datastore_name = archive_header.store;
             let snapshot = archive_header.snapshot;
+
+            let checked_chunks = checked_chunks_map.entry(datastore_name.clone()).or_insert(HashSet::new());
 
             task_log!(worker, "File {}: snapshot archive {}:{}", current_file_number, datastore_name, snapshot);
 
@@ -499,7 +525,7 @@ fn restore_archive<'a>(
                     if is_new {
                         task_log!(worker, "restore snapshot {}", backup_dir);
 
-                        match restore_snapshot_archive(worker, reader, &path) {
+                        match restore_snapshot_archive(worker, reader, &path, &datastore, checked_chunks) {
                             Err(err) => {
                                 std::fs::remove_dir_all(&path)?;
                                 bail!("restore snapshot {} failed - {}", backup_dir, err);
@@ -548,7 +574,11 @@ fn restore_archive<'a>(
                 .and_then(|t| t.0.get_datastore(&source_datastore));
 
             if datastore.is_some() || target.is_none() {
-                if let Some(chunks) = restore_chunk_archive(worker, reader, datastore, verbose)? {
+                let checked_chunks = checked_chunks_map
+                    .entry(datastore.map(|d| d.name()).unwrap_or("_unused_").to_string())
+                    .or_insert(HashSet::new());
+
+                if let Some(chunks) = restore_chunk_archive(worker, reader, datastore, checked_chunks, verbose)? {
                     catalog.start_chunk_archive(
                         Uuid::from(header.uuid),
                         current_file_number,
@@ -590,10 +620,11 @@ fn restore_chunk_archive<'a>(
     worker: &WorkerTask,
     reader: Box<dyn 'a + TapeRead>,
     datastore: Option<&DataStore>,
+    checked_chunks: &mut HashSet<[u8;32]>,
     verbose: bool,
 ) -> Result<Option<Vec<[u8;32]>>, Error> {
 
-     let mut chunks = Vec::new();
+    let mut chunks = Vec::new();
 
     let mut decoder = ChunkArchiveDecoder::new(reader);
 
@@ -637,6 +668,7 @@ fn restore_chunk_archive<'a>(
             } else if verbose {
                 task_log!(worker, "Found existing chunk: {}", proxmox::tools::digest_to_hex(&digest));
             }
+            checked_chunks.insert(digest.clone());
         } else if verbose {
             task_log!(worker, "Found chunk: {}", proxmox::tools::digest_to_hex(&digest));
         }
@@ -650,10 +682,12 @@ fn restore_snapshot_archive<'a>(
     worker: &WorkerTask,
     reader: Box<dyn 'a + TapeRead>,
     snapshot_path: &Path,
+    datastore: &DataStore,
+    checked_chunks: &mut HashSet<[u8;32]>,
 ) -> Result<bool, Error> {
 
     let mut decoder = pxar::decoder::sync::Decoder::from_std(reader)?;
-    match try_restore_snapshot_archive(worker, &mut decoder, snapshot_path) {
+    match try_restore_snapshot_archive(worker, &mut decoder, snapshot_path, datastore, checked_chunks) {
         Ok(()) => Ok(true),
         Err(err) => {
             let reader = decoder.input();
@@ -678,6 +712,8 @@ fn try_restore_snapshot_archive<R: pxar::decoder::SeqRead>(
     worker: &WorkerTask,
     decoder: &mut pxar::decoder::sync::Decoder<R>,
     snapshot_path: &Path,
+    datastore: &DataStore,
+    checked_chunks: &mut HashSet<[u8;32]>,
 ) -> Result<(), Error> {
 
     let _root = match decoder.next() {
@@ -768,11 +804,13 @@ fn try_restore_snapshot_archive<R: pxar::decoder::SeqRead>(
                 let index = DynamicIndexReader::open(&archive_path)?;
                 let (csum, size) = index.compute_csum();
                 manifest.verify_file(&item.filename, &csum, size)?;
+                datastore.fast_index_verification(&index, checked_chunks)?;
             }
             ArchiveType::FixedIndex => {
                 let index = FixedIndexReader::open(&archive_path)?;
                 let (csum, size) = index.compute_csum();
                 manifest.verify_file(&item.filename, &csum, size)?;
+                datastore.fast_index_verification(&index, checked_chunks)?;
             }
             ArchiveType::Blob => {
                 let mut tmpfile = std::fs::File::open(&archive_path)?;

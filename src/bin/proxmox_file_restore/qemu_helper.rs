@@ -127,9 +127,6 @@ pub async fn start_vm(
     if let Err(_) = std::env::var("PBS_PASSWORD") {
         bail!("environment variable PBS_PASSWORD has to be set for QEMU VM restore");
     }
-    if let Err(_) = std::env::var("PBS_FINGERPRINT") {
-        bail!("environment variable PBS_FINGERPRINT has to be set for QEMU VM restore");
-    }
 
     let pid;
     let (pid_fd, pid_path) = make_tmp_file("/tmp/file-restore-qemu.pid.tmp", CreateOptions::new())?;
@@ -193,9 +190,14 @@ pub async fn start_vm(
             continue;
         }
         drives.push("-drive".to_owned());
+        let keyfile = if let Some(ref keyfile) = details.keyfile {
+            format!(",,keyfile={}", keyfile)
+        } else {
+            "".to_owned()
+        };
         drives.push(format!(
-            "file=pbs:repository={},,snapshot={},,archive={},read-only=on,if=none,id=drive{}",
-            details.repo, details.snapshot, file, id
+            "file=pbs:repository={},,snapshot={},,archive={}{},read-only=on,if=none,id=drive{}",
+            details.repo, details.snapshot, file, keyfile, id
         ));
         drives.push("-device".to_owned());
         // drive serial is used by VM to map .fidx files to /dev paths

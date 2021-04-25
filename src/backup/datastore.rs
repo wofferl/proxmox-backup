@@ -153,6 +153,34 @@ impl DataStore {
         Ok(out)
     }
 
+    /// Fast index verification - only check if chunks exists
+    pub fn fast_index_verification(
+        &self,
+        index: &dyn IndexFile,
+        checked: &mut HashSet<[u8;32]>,
+    ) -> Result<(), Error> {
+
+        for pos in 0..index.index_count() {
+            let info = index.chunk_info(pos).unwrap();
+            if checked.contains(&info.digest) {
+                continue;
+            }
+
+            self.stat_chunk(&info.digest).
+                map_err(|err| {
+                    format_err!(
+                        "fast_index_verification error, stat_chunk {} failed - {}",
+                        proxmox::tools::digest_to_hex(&info.digest),
+                        err,
+                    )
+                })?;
+
+            checked.insert(info.digest);
+        }
+
+        Ok(())
+    }
+
     pub fn name(&self) -> &str {
         self.chunk_store.name()
     }
@@ -786,4 +814,3 @@ impl DataStore {
         self.verify_new
     }
 }
-

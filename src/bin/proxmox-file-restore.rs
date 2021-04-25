@@ -30,7 +30,7 @@ pub mod proxmox_client_tools;
 use proxmox_client_tools::{
     complete_group_or_snapshot, complete_repository, connect, extract_repository_from_value,
     key_source::{
-        crypto_parameters, format_key_source, get_encryption_key_password, KEYFD_SCHEMA,
+        crypto_parameters_keep_fd, format_key_source, get_encryption_key_password, KEYFD_SCHEMA,
         KEYFILE_SCHEMA,
     },
     REPO_URL_SCHEMA,
@@ -56,7 +56,7 @@ fn parse_path(path: String, base64: bool) -> Result<ExtractPath, Error> {
         return Ok(ExtractPath::ListArchives);
     }
 
-    while bytes.len() > 0 && bytes[0] == b'/' {
+    while !bytes.is_empty() && bytes[0] == b'/' {
         bytes.remove(0);
     }
 
@@ -74,6 +74,18 @@ fn parse_path(path: String, base64: bool) -> Result<ExtractPath, Error> {
     } else {
         bail!("'{}' is not supported for file-restore", file);
     }
+}
+
+fn keyfile_path(param: &Value) -> Option<String> {
+    if let Some(Value::String(keyfile)) = param.get("keyfile") {
+        return Some(keyfile.to_owned());
+    }
+
+    if let Some(Value::Number(keyfd)) = param.get("keyfd") {
+        return Some(format!("/dev/fd/{}", keyfd));
+    }
+
+    None
 }
 
 #[api(
@@ -138,7 +150,8 @@ async fn list(
     let snapshot: BackupDir = snapshot.parse()?;
     let path = parse_path(path, base64)?;
 
-    let crypto = crypto_parameters(&param)?;
+    let keyfile = keyfile_path(&param);
+    let crypto = crypto_parameters_keep_fd(&param)?;
     let crypt_config = match crypto.enc_key {
         None => None,
         Some(ref key) => {
@@ -170,14 +183,17 @@ async fn list(
         ExtractPath::ListArchives => {
             let mut entries = vec![];
             for file in manifest.files() {
-                match file.filename.rsplitn(2, '.').next().unwrap() {
-                    "didx" => {}
-                    "fidx" => {}
-                    _ => continue, // ignore all non fidx/didx
+                if !file.filename.ends_with(".pxar.didx") && !file.filename.ends_with(".img.fidx") {
+                    continue;
                 }
                 let path = format!("/{}", file.filename);
-                let attr = DirEntryAttribute::Directory { start: 0 };
-                entries.push(ArchiveEntry::new(path.as_bytes(), &attr));
+                let attr = if file.filename.ends_with(".pxar.didx") {
+                    // a pxar file is a file archive, so it's root is also a directory root
+                    Some(&DirEntryAttribute::Directory { start: 0 })
+                } else {
+                    None
+                };
+                entries.push(ArchiveEntry::new(path.as_bytes(), attr));
             }
 
             Ok(entries)
@@ -207,6 +223,7 @@ async fn list(
                 manifest,
                 repo,
                 snapshot,
+                keyfile,
             };
             let driver: Option<BlockDriverType> = match param.get("driver") {
                 Some(drv) => Some(serde_json::from_value(drv.clone())?),
@@ -306,7 +323,8 @@ async fn extract(
         None => Some(std::env::current_dir()?),
     };
 
-    let crypto = crypto_parameters(&param)?;
+    let keyfile = keyfile_path(&param);
+    let crypto = crypto_parameters_keep_fd(&param)?;
     let crypt_config = match crypto.enc_key {
         None => None,
         Some(ref key) => {
@@ -357,6 +375,7 @@ async fn extract(
                 manifest,
                 repo,
                 snapshot,
+                keyfile,
             };
             let driver: Option<BlockDriverType> = match param.get("driver") {
                 Some(drv) => Some(serde_json::from_value(drv.clone())?),
@@ -396,14 +415,16 @@ async fn extract_to_target<T>(
 where
     T: pxar::accessor::ReadAt + Clone + Send + Sync + Unpin + 'static,
 {
+    let path = if path.is_empty() { b"/" } else { path };
+
     let root = decoder.open_root().await?;
     let file = root
-        .lookup(OsStr::from_bytes(&path))
+        .lookup(OsStr::from_bytes(path))
         .await?
         .ok_or_else(|| format_err!("error opening '{:?}'", path))?;
 
     if let Some(target) = target {
-        extract_sub_dir(target, decoder, OsStr::from_bytes(&path), verbose).await?;
+        extract_sub_dir(target, decoder, OsStr::from_bytes(path), verbose).await?;
     } else {
         match file.kind() {
             pxar::EntryKind::File { .. } => {
@@ -413,7 +434,7 @@ where
                 create_zip(
                     tokio::io::stdout(),
                     decoder,
-                    OsStr::from_bytes(&path),
+                    OsStr::from_bytes(path),
                     verbose,
                 )
                 .await?;
