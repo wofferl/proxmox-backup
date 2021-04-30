@@ -81,7 +81,8 @@ zstd = { version = "0.4", features = [ "bindgen" ] }
 nom = "5.1"
 crossbeam-channel = "0.5"
 
-proxmox-acme-rs = "0.2.1"
+#proxmox-acme-rs = "0.2.1"
+proxmox-acme-rs = { path = "../proxmox-acme-rs" }
 
 [features]
 default = []

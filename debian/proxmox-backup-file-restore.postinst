@@ -4,7 +4,7 @@ set -e
 
 update_initramfs() {
     # regenerate initramfs for single file restore VM
-    INST_PATH="/usr/lib/x86_64-linux-gnu/proxmox-backup/file-restore"
+    INST_PATH="/usr/lib/aarch64-linux-gnu/proxmox-backup/file-restore"
     CACHE_PATH="/var/cache/proxmox-backup/file-restore-initramfs.img"
 
     # cleanup first, in case proxmox-file-restore was uninstalled since we do

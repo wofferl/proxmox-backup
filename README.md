@@ -53,6 +53,8 @@ git clone https://git.proxmox.com/git/pxar.git
 git -C pxar checkout -b 0.10.1 82608859c8f949f9f527eeb891b42897bc2675a0
 git clone https://git.proxmox.com/git/pathpatterns.git
 git -C pathpatterns checkout -b 0.1.2 916e41c50e75a718ab7b1b95dc770eed9cd7a403
+git clone https://git.proxmox.com/git/proxmox-acme-rs.git
+git -C proxmox-acme-rs checkout -b 0.2.1-1 a6ff69404b9f8e80d78d2a29eda977a3d8f90bfd
 ```
 
 ## Download rust crates
@@ -80,7 +82,7 @@ cd proxmox-mini-journalreader/ && make deb
 
 ###### proxmox-widget-toolkit
 git clone https://git.proxmox.com/git/proxmox-widget-toolkit.git
-git -C proxmox-widget-toolkit checkout -b 2.4 2d99e60eea3b59f2928854150c94989263e8d40b
+git -C proxmox-widget-toolkit checkout -b 2.5 33d34da8a7570d97d31b37f09714f53dcd3eb6c0
 cd proxmox-widget-toolkit/ && make deb
 
 ###### pbs-i18n
