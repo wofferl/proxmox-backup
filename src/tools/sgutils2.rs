@@ -223,10 +223,32 @@ pub struct InquiryInfo {
 #[derive(Endian, Debug, Copy, Clone)]
 pub struct ModeParameterHeader {
     pub mode_data_len: u16,
+    // Note: medium_type and density_code are not the same. On HP
+    // drives, medium_type provides very limited information and is
+    // not compatible with IBM.
     pub medium_type: u8,
     pub flags3: u8,
     reserved4: [u8;2],
     pub block_descriptior_len: u16,
+}
+
+impl ModeParameterHeader {
+
+    pub fn buffer_mode(&self) -> u8 {
+        (self.flags3 & 0b0111_0000) >> 4
+    }
+
+    pub fn set_buffer_mode(&mut self, buffer_mode: bool) {
+        let mut mode = self.flags3 & 0b1_000_1111;
+        if buffer_mode {
+            mode |= 0b0_001_0000;
+        }
+        self.flags3 = mode;
+    }
+
+    pub fn write_protect(&self) -> bool {
+        (self.flags3 & 0b1000_0000) != 0
+    }
 }
 
 #[repr(C, packed)]
@@ -706,20 +728,28 @@ pub fn scsi_mode_sense<F: AsRawFd, P: Endian>(
         let mut reader = &data[..];
 
         let head: ModeParameterHeader = unsafe { reader.read_be_value()? };
+        let expected_len = head.mode_data_len as usize + 2;
 
-        if (head.mode_data_len as usize + 2) != data.len() {
-            bail!("wrong mode_data_len");
+        if data.len() < expected_len {
+            bail!("wrong mode_data_len: got {}, expected {}", data.len(), expected_len);
+        } else if data.len() > expected_len {
+            // Note: Some hh7 drives returns the allocation_length
+            // instead of real data_len
+            let header_size = std::mem::size_of::<ModeParameterHeader>();
+            reader = &data[header_size..expected_len];
         }
 
         if disable_block_descriptor && head.block_descriptior_len != 0 {
-            bail!("wrong block_descriptior_len");
+            let len = head.block_descriptior_len;
+            bail!("wrong block_descriptior_len: {}, expected 0", len);
         }
 
         let mut block_descriptor: Option<ModeBlockDescriptor> = None;
 
         if !disable_block_descriptor {
             if head.block_descriptior_len != 8 {
-                bail!("wrong block_descriptior_len");
+                let len = head.block_descriptior_len;
+                bail!("wrong block_descriptior_len: {}, expected 8", len);
             }
 
             block_descriptor = Some(unsafe { reader.read_be_value()? });

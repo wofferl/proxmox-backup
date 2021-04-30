@@ -274,11 +274,16 @@ pub fn update_verification_job(
 
     if ignore_verified.is_some() { data.ignore_verified = ignore_verified; }
     if outdated_after.is_some() { data.outdated_after = outdated_after; }
+    let schedule_changed = data.schedule != schedule;
     if schedule.is_some() { data.schedule = schedule; }
 
     config.set_data(&id, "verification", &data)?;
 
     verify::save_config(&config)?;
+
+    if schedule_changed {
+        crate::server::jobstate::update_job_last_run_time("verificationjob", &id)?;
+    }
 
     Ok(())
 }

@@ -25,6 +25,8 @@ lazy_static! {
         m.insert("ext3", "noload");
         m.insert("ext4", "noload");
 
+        m.insert("xfs", "norecovery");
+
         // ufs2 is used as default since FreeBSD 5.0 released in 2003, so let's assume that
         // whatever the user is trying to restore is not using anything older...
         m.insert("ufs", "ufstype=ufs2");
@@ -36,13 +38,14 @@ lazy_static! {
 pub enum ResolveResult {
     Path(PathBuf),
     BucketTypes(Vec<&'static str>),
-    BucketComponents(Vec<String>),
+    BucketComponents(Vec<(String, u64)>),
 }
 
 struct PartitionBucketData {
     dev_node: String,
     number: i32,
     mountpoint: Option<PathBuf>,
+    size: u64,
 }
 
 /// A "Bucket" represents a mapping found on a disk, e.g. a partition, a zfs dataset or an LV. A
@@ -83,6 +86,12 @@ impl Bucket {
             Bucket::Partition(data) => data.number.to_string(),
         }
     }
+
+    fn size(&self) -> u64 {
+        match self {
+            Bucket::Partition(data) => data.size,
+        }
+    }
 }
 
 /// Functions related to the local filesystem. This mostly exists so we can use 'supported_fs' in
@@ -105,6 +114,8 @@ impl Filesystems {
                 supported_fs.push(f.to_owned());
             }
         }
+
+        info!("Supported FS: {}", supported_fs.join(", "));
 
         Ok(Self { supported_fs })
     }
@@ -209,15 +220,23 @@ impl DiskState {
                     .trim()
                     .parse::<i32>()?;
 
+                // this *always* contains the number of 512-byte sectors, regardless of the true
+                // blocksize of this disk - which should always be 512 here anyway
+                let size = fs::file_read_firstline(&format!("{}/size", part_path))?
+                    .trim()
+                    .parse::<u64>()?
+                    * 512;
+
                 info!(
-                    "drive '{}' ('{}'): found partition '{}' ({})",
-                    name, fidx, devnode, number
+                    "drive '{}' ('{}'): found partition '{}' ({}, {}B)",
+                    name, fidx, devnode, number, size
                 );
 
                 let bucket = Bucket::Partition(PartitionBucketData {
                     dev_node: devnode,
                     mountpoint: None,
                     number,
+                    size,
                 });
 
                 parts.push(bucket);
@@ -253,7 +272,11 @@ impl DiskState {
             _ => bail!("no or invalid image in path"),
         };
 
-        let buckets = match self.disk_map.get_mut(req_fidx.as_ref()) {
+        let buckets = match self.disk_map.get_mut(
+            req_fidx
+                .strip_suffix(".img.fidx")
+                .unwrap_or_else(|| req_fidx.as_ref()),
+        ) {
             Some(x) => x,
             None => bail!("given image '{}' not found", req_fidx),
         };
@@ -281,7 +304,7 @@ impl DiskState {
                 let comps = buckets
                     .iter()
                     .filter(|b| b.type_string() == bucket_type)
-                    .map(Bucket::component_string)
+                    .map(|b| (b.component_string(), b.size()))
                     .collect();
                 return Ok(ResolveResult::BucketComponents(comps));
             }

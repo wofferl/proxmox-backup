@@ -51,7 +51,7 @@ fn validate_img_existance() -> Result<(), Error> {
     let kernel = PathBuf::from(buildcfg::PROXMOX_BACKUP_KERNEL_FN);
     let initramfs = PathBuf::from(buildcfg::PROXMOX_BACKUP_INITRAMFS_FN);
     if !kernel.exists() || !initramfs.exists() {
-        bail!("cannot run file-restore VM: package 'proxmox-file-restore' is not (correctly) installed");
+        bail!("cannot run file-restore VM: package 'proxmox-backup-restore-image' is not (correctly) installed");
     }
     Ok(())
 }
@@ -168,13 +168,13 @@ pub async fn start_vm(
         "none",
         "-enable-kvm",
         "-m",
-        "512",
+        "128",
         "-kernel",
         buildcfg::PROXMOX_BACKUP_KERNEL_FN,
         "-initrd",
         &ramfs_path,
         "-append",
-        "quiet",
+        "quiet panic=1",
         "-daemonize",
         "-pidfile",
         &format!("/dev/fd/{}", pid_fd.as_raw_fd()),
@@ -201,7 +201,8 @@ pub async fn start_vm(
         ));
         drives.push("-device".to_owned());
         // drive serial is used by VM to map .fidx files to /dev paths
-        drives.push(format!("virtio-blk-pci,drive=drive{},serial={}", id, file));
+        let serial = file.strip_suffix(".img.fidx").unwrap_or(&file);
+        drives.push(format!("virtio-blk-pci,drive=drive{},serial={}", id, serial));
         id += 1;
     }
 

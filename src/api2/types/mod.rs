@@ -751,9 +751,8 @@ impl Default for GarbageCollectionStatus {
     }
 }
 
-
 #[api()]
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 /// Storage space usage information.
 pub struct StorageStatus {
     /// Total space (bytes).
@@ -1355,6 +1354,18 @@ pub struct ArchiveEntry {
 
 impl ArchiveEntry {
     pub fn new(filepath: &[u8], entry_type: Option<&DirEntryAttribute>) -> Self {
+        let size = match entry_type {
+            Some(DirEntryAttribute::File { size, .. }) => Some(*size),
+            _ => None,
+        };
+        Self::new_with_size(filepath, entry_type, size)
+    }
+
+    pub fn new_with_size(
+        filepath: &[u8],
+        entry_type: Option<&DirEntryAttribute>,
+        size: Option<u64>,
+    ) -> Self {
         Self {
             filepath: base64::encode(filepath),
             text: String::from_utf8_lossy(filepath.split(|x| *x == b'/').last().unwrap())
@@ -1364,13 +1375,10 @@ impl ArchiveEntry {
                 None => "v".to_owned(),
             },
             leaf: !matches!(entry_type, None | Some(DirEntryAttribute::Directory { .. })),
-            size: match entry_type {
-                Some(DirEntryAttribute::File { size, .. }) => Some(*size),
-                _ => None
-            },
+            size,
             mtime: match entry_type {
                 Some(DirEntryAttribute::File { mtime, .. }) => Some(*mtime),
-                _ => None
+                _ => None,
             },
         }
     }
@@ -1507,3 +1515,109 @@ pub struct JobScheduleStatus {
     #[serde(skip_serializing_if="Option::is_none")]
     pub last_run_endtime: Option<i64>,
 }
+
+#[api]
+#[derive(Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+/// Node memory usage counters
+pub struct NodeMemoryCounters {
+    /// Total memory
+    pub total: u64,
+    /// Used memory
+    pub used: u64,
+    /// Free memory
+    pub free: u64,
+}
+
+#[api]
+#[derive(Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+/// Node swap usage counters
+pub struct NodeSwapCounters {
+    /// Total swap
+    pub total: u64,
+    /// Used swap
+    pub used: u64,
+    /// Free swap
+    pub free: u64,
+}
+
+#[api]
+#[derive(Serialize,Deserialize,Default)]
+#[serde(rename_all = "kebab-case")]
+/// Contains general node information such as the fingerprint`
+pub struct NodeInformation {
+    /// The SSL Fingerprint
+    pub fingerprint: String,
+}
+
+#[api]
+#[derive(Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+/// Information about the CPU
+pub struct NodeCpuInformation {
+    /// The CPU model
+    pub model: String,
+    /// The number of CPU sockets
+    pub sockets: usize,
+    /// The number of CPU cores (incl. threads)
+    pub cpus: usize,
+}
+
+#[api(
+    properties: {
+        memory: {
+            type: NodeMemoryCounters,
+        },
+        root: {
+            type: StorageStatus,
+        },
+        swap: {
+            type: NodeSwapCounters,
+        },
+        loadavg: {
+            type: Array,
+            items: {
+                type: Number,
+                description: "the load",
+            }
+        },
+        cpuinfo: {
+            type: NodeCpuInformation,
+        },
+        info: {
+            type: NodeInformation,
+        }
+    },
+)]
+#[derive(Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+/// The Node status
+pub struct NodeStatus {
+    pub memory: NodeMemoryCounters,
+    pub root: StorageStatus,
+    pub swap: NodeSwapCounters,
+    /// The current uptime of the server.
+    pub uptime: u64,
+    /// Load for 1, 5 and 15 minutes.
+    pub loadavg: [f64; 3],
+    /// The current kernel version.
+    pub kversion: String,
+    /// Total CPU usage since last query.
+    pub cpu: f64,
+    /// Total IO wait since last query.
+    pub wait: f64,
+    pub cpuinfo: NodeCpuInformation,
+    pub info: NodeInformation,
+}
+
+pub const HTTP_PROXY_SCHEMA: Schema = StringSchema::new(
+    "HTTP proxy configuration [http://]<host>[:port]")
+    .format(&ApiStringFormat::VerifyFn(|s| {
+        crate::tools::http::ProxyConfig::parse_proxy_url(s)?;
+        Ok(())
+    }))
+    .min_length(1)
+    .max_length(128)
+    .type_text("[http://]<host>[:port]")
+    .schema();

@@ -2,7 +2,7 @@ use std::process::Command;
 use std::path::Path;
 
 use anyhow::{Error, format_err, bail};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use proxmox::sys::linux::procfs;
 
@@ -11,6 +11,16 @@ use proxmox::api::{api, ApiMethod, Router, RpcEnvironment, Permission};
 use crate::api2::types::*;
 use crate::config::acl::{PRIV_SYS_AUDIT, PRIV_SYS_POWER_MANAGEMENT};
 use crate::tools::cert::CertInfo;
+
+impl std::convert::From<procfs::ProcFsCPUInfo> for NodeCpuInformation {
+    fn from(info: procfs::ProcFsCPUInfo) -> Self {
+        Self {
+            model: info.model,
+            sockets: info.sockets,
+            cpus: info.cpus,
+        }
+    }
+}
 
 #[api(
     input: {
@@ -21,43 +31,7 @@ use crate::tools::cert::CertInfo;
         },
     },
     returns: {
-        type: Object,
-        description: "Returns node memory, CPU and (root) disk usage",
-        properties: {
-            memory: {
-                type: Object,
-                description: "node memory usage counters",
-                properties: {
-                    total: {
-                        description: "total memory",
-                        type: Integer,
-                    },
-                    used: {
-                        description: "total memory",
-                        type: Integer,
-                    },
-                    free: {
-                        description: "free memory",
-                        type: Integer,
-                    },
-                },
-            },
-            cpu: {
-                type: Number,
-                description: "Total CPU usage since last query.",
-                optional: true,
-            },
-            info: {
-                type: Object,
-                description: "contains node information",
-                properties: {
-                    fingerprint: {
-                        description: "The SSL Fingerprint",
-                        type: String,
-                    },
-                },
-            },
-        },
+        type: NodeStatus,
     },
     access: {
         permission: &Permission::Privilege(&["system", "status"], PRIV_SYS_AUDIT, false),
@@ -68,32 +42,52 @@ fn get_status(
     _param: Value,
     _info: &ApiMethod,
     _rpcenv: &mut dyn RpcEnvironment,
-) -> Result<Value, Error> {
-
+) -> Result<NodeStatus, Error> {
     let meminfo: procfs::ProcFsMemInfo = procfs::read_meminfo()?;
+    let memory = NodeMemoryCounters {
+        total: meminfo.memtotal,
+        used: meminfo.memused,
+        free: meminfo.memfree,
+    };
+
+    let swap = NodeSwapCounters {
+        total: meminfo.swaptotal,
+        used: meminfo.swapused,
+        free: meminfo.swapfree,
+    };
+
     let kstat: procfs::ProcFsStat = procfs::read_proc_stat()?;
-    let disk_usage = crate::tools::disks::disk_usage(Path::new("/"))?;
+    let cpu = kstat.cpu;
+    let wait = kstat.iowait_percent;
 
-    // get fingerprint
-    let cert = CertInfo::new()?;
-    let fp = cert.fingerprint()?;
+    let loadavg = procfs::Loadavg::read()?;
+    let loadavg = [loadavg.one(), loadavg.five(), loadavg.fifteen()];
 
-    Ok(json!({
-        "memory": {
-            "total": meminfo.memtotal,
-            "used": meminfo.memused,
-            "free": meminfo.memfree,
+    let cpuinfo = procfs::read_cpuinfo()?;
+    let cpuinfo = cpuinfo.into();
+
+    let uname = nix::sys::utsname::uname();
+    let kversion = format!(
+        "{} {} {}",
+        uname.sysname(),
+        uname.release(),
+        uname.version()
+    );
+
+    Ok(NodeStatus {
+        memory,
+        swap,
+        root: crate::tools::disks::disk_usage(Path::new("/"))?,
+        uptime: procfs::read_proc_uptime()?.0 as u64,
+        loadavg,
+        kversion,
+        cpuinfo,
+        cpu,
+        wait,
+        info: NodeInformation {
+            fingerprint: CertInfo::new()?.fingerprint()?,
         },
-        "cpu": kstat.cpu,
-        "root": {
-            "total": disk_usage.total,
-            "used": disk_usage.used,
-            "free": disk_usage.avail,
-        },
-        "info": {
-            "fingerprint": fp,
-        },
-    }))
+    })
 }
 
 #[api(

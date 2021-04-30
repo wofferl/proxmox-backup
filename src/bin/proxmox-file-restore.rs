@@ -47,7 +47,8 @@ enum ExtractPath {
 
 fn parse_path(path: String, base64: bool) -> Result<ExtractPath, Error> {
     let mut bytes = if base64 {
-        base64::decode(path)?
+        base64::decode(&path)
+            .map_err(|err| format_err!("Failed base64-decoding path '{}' - {}", path, err))?
     } else {
         path.into_bytes()
     };
@@ -193,7 +194,7 @@ async fn list(
                 } else {
                     None
                 };
-                entries.push(ArchiveEntry::new(path.as_bytes(), attr));
+                entries.push(ArchiveEntry::new_with_size(path.as_bytes(), attr, Some(file.size)));
             }
 
             Ok(entries)
