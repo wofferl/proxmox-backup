@@ -1336,7 +1336,7 @@ pub fn catalog_media(
             drive.read_label()?; // skip over labels - we already read them above
 
             let mut checked_chunks = HashMap::new();
-            restore_media(&worker, &mut drive, &media_id, None, &mut checked_chunks, verbose)?;
+            restore_media(worker, &mut drive, &media_id, None, &mut checked_chunks, verbose)?;
 
             Ok(())
         },
@@ -1453,7 +1453,7 @@ pub const SUBDIRS: SubdirMap = &sorted!([
     (
         "load-slot",
         &Router::new()
-            .put(&API_METHOD_LOAD_SLOT)
+            .post(&API_METHOD_LOAD_SLOT)
     ),
     (
         "cartridge-memory",

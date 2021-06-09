@@ -11,7 +11,6 @@ use crate::{
     backup::{
         CryptMode,
         Fingerprint,
-        BACKUP_ID_REGEX,
         DirEntryAttribute,
         CatalogEntryType,
     },
@@ -37,6 +36,9 @@ pub use tape::*;
 mod file_restore;
 pub use file_restore::*;
 
+mod acme;
+pub use acme::*;
+
 // File names: may not contain slashes, may not start with "."
 pub const FILENAME_FORMAT: ApiStringFormat = ApiStringFormat::VerifyFn(|name| {
     if name.starts_with('.') {
@@ -48,8 +50,24 @@ pub const FILENAME_FORMAT: ApiStringFormat = ApiStringFormat::VerifyFn(|name| {
     Ok(())
 });
 
+macro_rules! BACKUP_ID_RE { () => (r"[A-Za-z0-9_][A-Za-z0-9._\-]*") }
+macro_rules! BACKUP_TYPE_RE { () => (r"(?:host|vm|ct)") }
+macro_rules! BACKUP_TIME_RE {
+    () => (r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+}
+macro_rules! SNAPSHOT_PATH_REGEX_STR {
+    () => (
+        concat!(r"(", BACKUP_TYPE_RE!(), ")/(", BACKUP_ID_RE!(), ")/(", BACKUP_TIME_RE!(), r")")
+    );
+}
+
 macro_rules! DNS_LABEL { () => (r"(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]*[a-zA-Z0-9])?)") }
 macro_rules! DNS_NAME { () => (concat!(r"(?:(?:", DNS_LABEL!() , r"\.)*", DNS_LABEL!(), ")")) }
+
+macro_rules! DNS_ALIAS_LABEL { () => (r"(?:[a-zA-Z0-9_](?:[a-zA-Z0-9\-]*[a-zA-Z0-9])?)") }
+macro_rules! DNS_ALIAS_NAME {
+    () => (concat!(r"(?:(?:", DNS_ALIAS_LABEL!() , r"\.)*", DNS_ALIAS_LABEL!(), ")"))
+}
 
 macro_rules! CIDR_V4_REGEX_STR { () => (concat!(r"(?:", IPV4RE!(), r"/\d{1,2})$")) }
 macro_rules! CIDR_V6_REGEX_STR { () => (concat!(r"(?:", IPV6RE!(), r"/\d{1,3})$")) }
@@ -87,6 +105,8 @@ const_regex!{
 
     pub DNS_NAME_REGEX =  concat!(r"^", DNS_NAME!(), r"$");
 
+    pub DNS_ALIAS_REGEX =  concat!(r"^", DNS_ALIAS_NAME!(), r"$");
+
     pub DNS_NAME_OR_IP_REGEX = concat!(r"^(?:", DNS_NAME!(), "|",  IPRE!(), r")$");
 
     pub BACKUP_REPO_URL_REGEX = concat!(r"^^(?:(?:(", USER_ID_REGEX_STR!(), "|", APITOKEN_ID_REGEX_STR!(), ")@)?(", DNS_NAME!(), "|",  IPRE_BRACKET!() ,"):)?(?:([0-9]{1,5}):)?(", PROXMOX_SAFE_ID_REGEX_STR!(), r")$");
@@ -103,7 +123,21 @@ const_regex!{
 
     pub UUID_REGEX = r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$";
 
+    pub BACKUP_TYPE_REGEX = concat!(r"^(", BACKUP_TYPE_RE!(), r")$");
+
+    pub BACKUP_ID_REGEX = concat!(r"^", BACKUP_ID_RE!(), r"$");
+
+    pub BACKUP_DATE_REGEX = concat!(r"^", BACKUP_TIME_RE!() ,r"$");
+
+    pub GROUP_PATH_REGEX = concat!(r"^(", BACKUP_TYPE_RE!(), ")/(", BACKUP_ID_RE!(), r")$");
+
+    pub SNAPSHOT_PATH_REGEX = concat!(r"^", SNAPSHOT_PATH_REGEX_STR!(), r"$");
+
+    pub BACKUP_FILE_REGEX = r"^.*\.([fd]idx|blob)$";
+
     pub DATASTORE_MAP_REGEX = concat!(r"(:?", PROXMOX_SAFE_ID_REGEX_STR!(), r"=)?", PROXMOX_SAFE_ID_REGEX_STR!());
+
+    pub TAPE_RESTORE_SNAPSHOT_REGEX = concat!(r"^", PROXMOX_SAFE_ID_REGEX_STR!(), r":", SNAPSHOT_PATH_REGEX_STR!(), r"$");
 }
 
 pub const SYSTEMD_DATETIME_FORMAT: ApiStringFormat =
@@ -142,6 +176,9 @@ pub const HOSTNAME_FORMAT: ApiStringFormat =
 pub const DNS_NAME_FORMAT: ApiStringFormat =
     ApiStringFormat::Pattern(&DNS_NAME_REGEX);
 
+pub const DNS_ALIAS_FORMAT: ApiStringFormat =
+    ApiStringFormat::Pattern(&DNS_ALIAS_REGEX);
+
 pub const DNS_NAME_OR_IP_FORMAT: ApiStringFormat =
     ApiStringFormat::Pattern(&DNS_NAME_OR_IP_REGEX);
 
@@ -171,6 +208,9 @@ pub const BLOCKDEVICE_NAME_FORMAT: ApiStringFormat =
 
 pub const DATASTORE_MAP_FORMAT: ApiStringFormat =
     ApiStringFormat::Pattern(&DATASTORE_MAP_REGEX);
+
+pub const TAPE_RESTORE_SNAPSHOT_FORMAT: ApiStringFormat =
+    ApiStringFormat::Pattern(&TAPE_RESTORE_SNAPSHOT_REGEX);
 
 pub const PASSWORD_SCHEMA: Schema = StringSchema::new("Password.")
     .format(&PASSWORD_FORMAT)
@@ -381,6 +421,12 @@ pub const DATASTORE_MAP_LIST_SCHEMA: Schema = StringSchema::new(
     all other sources to the default 'e'. If no default is given, only the \
     specified sources are mapped.")
     .format(&ApiStringFormat::PropertyString(&DATASTORE_MAP_ARRAY_SCHEMA))
+    .schema();
+
+pub const TAPE_RESTORE_SNAPSHOT_SCHEMA: Schema = StringSchema::new(
+    "A snapshot in the format: 'store:type/id/time")
+    .format(&TAPE_RESTORE_SNAPSHOT_FORMAT)
+    .type_text("store:type/id/time")
     .schema();
 
 pub const MEDIA_SET_UUID_SCHEMA: Schema =
@@ -1614,7 +1660,7 @@ pub struct NodeStatus {
 pub const HTTP_PROXY_SCHEMA: Schema = StringSchema::new(
     "HTTP proxy configuration [http://]<host>[:port]")
     .format(&ApiStringFormat::VerifyFn(|s| {
-        crate::tools::http::ProxyConfig::parse_proxy_url(s)?;
+        proxmox_http::ProxyConfig::parse_proxy_url(s)?;
         Ok(())
     }))
     .min_length(1)

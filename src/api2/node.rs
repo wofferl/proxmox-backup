@@ -17,7 +17,7 @@ use proxmox::api::{
     api, schema::*, ApiHandler, ApiMethod, ApiResponseFuture, Permission, RpcEnvironment,
 };
 use proxmox::list_subdirs_api_method;
-use proxmox::tools::websocket::WebSocket;
+use proxmox_http::websocket::WebSocket;
 use proxmox::{identity, sortable};
 
 use crate::api2::types::*;
@@ -27,6 +27,8 @@ use crate::tools;
 use crate::tools::ticket::{self, Empty, Ticket};
 
 pub mod apt;
+pub mod certificates;
+pub mod config;
 pub mod disks;
 pub mod dns;
 pub mod network;
@@ -314,6 +316,8 @@ fn upgrade_to_websocket(
 
 pub const SUBDIRS: SubdirMap = &[
     ("apt", &apt::ROUTER),
+    ("certificates", &certificates::ROUTER),
+    ("config", &config::ROUTER),
     ("disks", &disks::ROUTER),
     ("dns", &dns::ROUTER),
     ("journal", &journal::ROUTER),

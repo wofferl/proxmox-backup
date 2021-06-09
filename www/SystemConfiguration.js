@@ -63,6 +63,11 @@ Ext.define('PBS.SystemConfiguration', {
 		    title: gettext('Webauthn'),
 		    xtype: 'pbsWebauthnConfigView',
 		},
+		{
+		    // FIXME: this is only a semi-OK place as long as there's only the http-proxy in there
+		    title: gettext('HTTP proxy'),
+		    xtype: 'pbsNodeOptionView',
+		},
 	    ],
 	},
     ],

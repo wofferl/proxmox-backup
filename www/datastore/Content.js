@@ -374,13 +374,30 @@ Ext.define('PBS.DataStoreContent', {
 	    });
 	},
 
-	onForget: function(view, rI, cI, item, e, rec) {
+	forgetGroup: function(data) {
 	    let me = this;
-	    view = this.getView();
+	    let view = me.getView();
 
-	    if (!(rec && rec.data)) return;
-	    let data = rec.data;
-	    if (!view.datastore) return;
+	    Ext.create('Proxmox.window.SafeDestroy', {
+		url: `/admin/datastore/${view.datastore}/groups`,
+		params: {
+		    "backup-type": data.backup_type,
+		    "backup-id": data.backup_id,
+		},
+		item: {
+		    id: data.text,
+		},
+		autoShow: true,
+		taskName: 'forget-group',
+		listeners: {
+		    destroy: () => me.reload(),
+		},
+	    });
+	},
+
+	forgetSnapshot: function(data) {
+	    let me = this;
+	    let view = me.getView();
 
 	    Ext.Msg.show({
 		title: gettext('Confirm'),
@@ -394,12 +411,12 @@ Ext.define('PBS.DataStoreContent', {
 		    }
 
 		    Proxmox.Utils.API2Request({
+			url: `/admin/datastore/${view.datastore}/snapshots`,
 			params: {
 			    "backup-type": data["backup-type"],
 			    "backup-id": data["backup-id"],
 			    "backup-time": (data['backup-time'].getTime()/1000).toFixed(0),
 			},
-			url: `/admin/datastore/${view.datastore}/snapshots`,
 			method: 'DELETE',
 			waitMsgTarget: view,
 			failure: function(response, opts) {
@@ -409,6 +426,21 @@ Ext.define('PBS.DataStoreContent', {
 		    });
 		},
 	    });
+	},
+
+	onForget: function(view, rI, cI, item, e, rec) {
+	    let me = this;
+	    view = this.getView();
+
+	    if (!(rec && rec.data)) return;
+	    let data = rec.data;
+	    if (!view.datastore) return;
+
+	    if (rec.parentNode.id !== 'root') {
+		me.forgetSnapshot(data);
+	    } else {
+		me.forgetGroup(data);
+	    }
 	},
 
 	downloadFile: function(tV, rI, cI, item, e, rec) {
@@ -616,9 +648,11 @@ Ext.define('PBS.DataStoreContent', {
 		},
 		{
 		    handler: 'onForget',
-		    getTip: (v, m, rec) => Ext.String.format(gettext("Permanently forget snapshot '{0}'"), v),
-		    getClass: (v, m, rec) => !rec.data.leaf && rec.parentNode.id !== 'root' ? 'fa critical fa-trash-o' : 'pmx-hidden',
-		    isDisabled: (v, r, c, i, rec) => rec.data.leaf || rec.parentNode.id === 'root',
+		    getTip: (v, m, rec) => rec.parentNode.id !=='root'
+			? Ext.String.format(gettext("Permanently forget snapshot '{0}'"), v)
+			: Ext.String.format(gettext("Permanently forget group '{0}'"), v),
+		    getClass: (v, m, rec) => !rec.data.leaf ? 'fa critical fa-trash-o' : 'pmx-hidden',
+		    isDisabled: (v, r, c, i, rec) => !!rec.data.leaf,
 		},
 		{
 		    handler: 'downloadFile',

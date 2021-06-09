@@ -1,5 +1,7 @@
 mod acl;
 pub use acl::*;
+mod acme;
+pub use acme::*;
 mod cert;
 pub use cert::*;
 mod datastore;
@@ -20,3 +22,5 @@ mod subscription;
 pub use subscription::*;
 mod disk;
 pub use disk::*;
+mod node;
+pub use node::*;

@@ -20,13 +20,16 @@ use proxmox::{
     tools::fs::{file_get_json, replace_file, CreateOptions},
 };
 
+use proxmox_http::client::HttpsConnector;
+use proxmox_http::uri::build_authority;
+
 use super::pipe_to_stream::PipeToSendStream;
 use crate::api2::types::{Authid, Userid};
 use crate::tools::{
     self,
     BroadcastFuture,
     DEFAULT_ENCODE_SET,
-    http::HttpsConnector,
+    PROXMOX_BACKUP_TCP_KEEPALIVE_TIME,
 };
 
 /// Timeout used for several HTTP operations that are expected to finish quickly but may block in
@@ -273,6 +276,18 @@ fn load_ticket_info(prefix: &str, server: &str, userid: &Userid) -> Option<(Stri
     }
 }
 
+fn build_uri(server: &str, port: u16, path: &str, query: Option<String>) -> Result<Uri, Error> {
+    Uri::builder()
+        .scheme("https")
+        .authority(build_authority(server, port)?)
+        .path_and_query(match query {
+            Some(query) => format!("/{}?{}", path, query),
+            None => format!("/{}", path),
+        })
+        .build()
+        .map_err(|err| format_err!("error building uri - {}", err))
+}
+
 impl HttpClient {
     pub fn new(
         server: &str,
@@ -283,13 +298,13 @@ impl HttpClient {
 
         let verified_fingerprint = Arc::new(Mutex::new(None));
 
-        let mut fingerprint = options.fingerprint.take();
+        let mut expected_fingerprint = options.fingerprint.take();
 
-        if fingerprint.is_some() {
+        if expected_fingerprint.is_some() {
             // do not store fingerprints passed via options in cache
             options.fingerprint_cache = false;
         } else if options.fingerprint_cache && options.prefix.is_some() {
-            fingerprint = load_fingerprint(options.prefix.as_ref().unwrap(), server);
+            expected_fingerprint = load_fingerprint(options.prefix.as_ref().unwrap(), server);
         }
 
         let mut ssl_connector_builder = SslConnector::builder(SslMethod::tls()).unwrap();
@@ -301,9 +316,9 @@ impl HttpClient {
             let fingerprint_cache = options.fingerprint_cache;
             let prefix = options.prefix.clone();
             ssl_connector_builder.set_verify_callback(openssl::ssl::SslVerifyMode::PEER, move |valid, ctx| {
-                let (valid, fingerprint) = Self::verify_callback(valid, ctx, fingerprint.clone(), interactive);
-                if valid {
-                    if let Some(fingerprint) = fingerprint {
+                match Self::verify_callback(valid, ctx, expected_fingerprint.as_ref(), interactive) {
+                    Ok(None) => true,
+                    Ok(Some(fingerprint)) => {
                         if fingerprint_cache && prefix.is_some() {
                             if let Err(err) = store_fingerprint(
                                 prefix.as_ref().unwrap(), &server, &fingerprint) {
@@ -311,9 +326,13 @@ impl HttpClient {
                             }
                         }
                         *verified_fingerprint.lock().unwrap() = Some(fingerprint);
-                    }
+                        true
+                    },
+                    Err(err) => {
+                        eprintln!("certificate validation failed - {}", err);
+                        false
+                    },
                 }
-                valid
             });
         } else {
             ssl_connector_builder.set_verify(openssl::ssl::SslVerifyMode::NONE);
@@ -324,7 +343,7 @@ impl HttpClient {
         httpc.enforce_http(false); // we want https...
 
         httpc.set_connect_timeout(Some(std::time::Duration::new(10, 0)));
-        let https = HttpsConnector::with_connector(httpc, ssl_connector_builder.build());
+        let https = HttpsConnector::with_connector(httpc, ssl_connector_builder.build(), PROXMOX_BACKUP_TCP_KEEPALIVE_TIME);
 
         let client = Client::builder()
         //.http2_initial_stream_window_size( (1 << 31) - 2)
@@ -459,42 +478,47 @@ impl HttpClient {
     }
 
     fn verify_callback(
-        valid: bool, ctx:
-        &mut X509StoreContextRef,
-        expected_fingerprint: Option<String>,
+        openssl_valid: bool,
+        ctx: &mut X509StoreContextRef,
+        expected_fingerprint: Option<&String>,
         interactive: bool,
-    ) -> (bool, Option<String>) {
-        if valid { return (true, None); }
+    ) -> Result<Option<String>, Error> {
+
+        if openssl_valid {
+            return Ok(None);
+        }
 
         let cert = match ctx.current_cert() {
             Some(cert) => cert,
-            None => return (false, None),
+            None => bail!("context lacks current certificate."),
         };
 
         let depth = ctx.error_depth();
-        if depth != 0 { return (false, None); }
+        if depth != 0 { bail!("context depth != 0") }
 
         let fp = match cert.digest(openssl::hash::MessageDigest::sha256()) {
             Ok(fp) => fp,
-            Err(_) => return (false, None), // should not happen
+            Err(err) => bail!("failed to calculate certificate FP - {}", err), // should not happen
         };
         let fp_string = proxmox::tools::digest_to_hex(&fp);
         let fp_string = fp_string.as_bytes().chunks(2).map(|v| std::str::from_utf8(v).unwrap())
             .collect::<Vec<&str>>().join(":");
 
         if let Some(expected_fingerprint) = expected_fingerprint {
-            if expected_fingerprint.to_lowercase() == fp_string {
-                return (true, Some(fp_string));
+            let expected_fingerprint = expected_fingerprint.to_lowercase();
+            if expected_fingerprint == fp_string {
+                return Ok(Some(fp_string));
             } else {
-                return (false, None);
+                eprintln!("WARNING: certificate fingerprint does not match expected fingerprint!");
+                eprintln!("expected:    {}", expected_fingerprint);
             }
         }
 
         // If we're on a TTY, query the user
         if interactive && tty::stdin_isatty() {
-            println!("fingerprint: {}", fp_string);
+            eprintln!("fingerprint: {}", fp_string);
             loop {
-                print!("Are you sure you want to continue connecting? (y/n): ");
+                eprint!("Are you sure you want to continue connecting? (y/n): ");
                 let _ = std::io::stdout().flush();
                 use std::io::{BufRead, BufReader};
                 let mut line = String::new();
@@ -502,18 +526,19 @@ impl HttpClient {
                     Ok(_) => {
                         let trimmed = line.trim();
                         if trimmed == "y" || trimmed == "Y" {
-                            return (true, Some(fp_string));
+                            return Ok(Some(fp_string));
                         } else if trimmed == "n" || trimmed == "N" {
-                            return (false, None);
+                            bail!("Certificate fingerprint was not confirmed.");
                         } else {
                             continue;
                         }
                     }
-                    Err(_) => return (false, None),
+                    Err(err) => bail!("Certificate fingerprint was not confirmed - {}.", err),
                 }
             }
         }
-        (false, None)
+
+        bail!("Certificate fingerprint was not confirmed.");
     }
 
     pub async fn request(&self, mut req: Request<Body>) -> Result<Value, Error> {
@@ -614,16 +639,11 @@ impl HttpClient {
         data: Option<Value>,
     ) -> Result<Value, Error> {
 
-        let path = path.trim_matches('/');
-        let mut url = format!("https://{}:{}/{}", &self.server, self.port, path);
-
-        if let Some(data) = data {
-            let query = tools::json_object_to_query(data).unwrap();
-            url.push('?');
-            url.push_str(&query);
-        }
-
-        let url: Uri = url.parse().unwrap();
+        let query = match data {
+            Some(data) => Some(tools::json_object_to_query(data)?),
+            None => None,
+        };
+        let url = build_uri(&self.server, self.port, path, query)?;
 
         let req = Request::builder()
             .method("POST")
@@ -757,39 +777,38 @@ impl HttpClient {
     }
 
     pub fn request_builder(server: &str, port: u16, method: &str, path: &str, data: Option<Value>) -> Result<Request<Body>, Error> {
-        let path = path.trim_matches('/');
-        let url: Uri = format!("https://{}:{}/{}", server, port, path).parse()?;
-
         if let Some(data) = data {
             if method == "POST" {
+                let url = build_uri(server, port, path, None)?;
                 let request = Request::builder()
                     .method(method)
                     .uri(url)
                     .header("User-Agent", "proxmox-backup-client/1.0")
                     .header(hyper::header::CONTENT_TYPE, "application/json")
                     .body(Body::from(data.to_string()))?;
-                return Ok(request);
+                Ok(request)
             } else {
                 let query = tools::json_object_to_query(data)?;
-                let url: Uri = format!("https://{}:{}/{}?{}", server, port, path, query).parse()?;
+                let url = build_uri(server, port, path, Some(query))?;
                 let request = Request::builder()
                     .method(method)
                     .uri(url)
                     .header("User-Agent", "proxmox-backup-client/1.0")
                     .header(hyper::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                     .body(Body::empty())?;
-                return Ok(request);
+                Ok(request)
             }
+        } else {
+            let url = build_uri(server, port, path, None)?;
+            let request = Request::builder()
+                .method(method)
+                .uri(url)
+                .header("User-Agent", "proxmox-backup-client/1.0")
+                .header(hyper::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::empty())?;
+
+            Ok(request)
         }
-
-        let request = Request::builder()
-            .method(method)
-            .uri(url)
-            .header("User-Agent", "proxmox-backup-client/1.0")
-            .header(hyper::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(Body::empty())?;
-
-        Ok(request)
     }
 }
 
@@ -970,29 +989,25 @@ impl H2Client {
         let path = path.trim_matches('/');
 
         let content_type = content_type.unwrap_or("application/x-www-form-urlencoded");
+        let query = match param {
+            Some(param) => {
+                let query = tools::json_object_to_query(param)?;
+                // We detected problem with hyper around 6000 characters - so we try to keep on the safe side
+                if query.len() > 4096 {
+                    bail!("h2 query data too large ({} bytes) - please encode data inside body", query.len());
+                }
+                Some(query)
+            }
+            None => None,
+        };
 
-        if let Some(param) = param {
-            let query = tools::json_object_to_query(param)?;
-            // We detected problem with hyper around 6000 characters - seo we try to keep on the safe side
-            if query.len() > 4096 { bail!("h2 query data too large ({} bytes) - please encode data inside body", query.len()); }
-            let url: Uri = format!("https://{}:8007/{}?{}", server, path, query).parse()?;
-             let request = Request::builder()
-                .method(method)
-                .uri(url)
-                .header("User-Agent", "proxmox-backup-client/1.0")
-                .header(hyper::header::CONTENT_TYPE, content_type)
-                .body(())?;
-            Ok(request)
-        } else {
-            let url: Uri = format!("https://{}:8007/{}", server, path).parse()?;
-            let request = Request::builder()
-                .method(method)
-                .uri(url)
-                .header("User-Agent", "proxmox-backup-client/1.0")
-                .header(hyper::header::CONTENT_TYPE, content_type)
-                .body(())?;
-
-            Ok(request)
-        }
+        let url = build_uri(server, 8007, path, query)?;
+        let request = Request::builder()
+            .method(method)
+            .uri(url)
+            .header("User-Agent", "proxmox-backup-client/1.0")
+            .header(hyper::header::CONTENT_TYPE, content_type)
+            .body(())?;
+        Ok(request)
     }
 }

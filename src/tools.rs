@@ -16,6 +16,13 @@ use openssl::hash::{hash, DigestBytes, MessageDigest};
 use percent_encoding::{utf8_percent_encode, AsciiSet};
 
 pub use proxmox::tools::fd::Fd;
+use proxmox::tools::fs::{create_path, CreateOptions};
+
+use proxmox_http::{
+    client::SimpleHttp,
+    client::SimpleHttpOptions,
+    ProxyConfig,
+};
 
 pub mod acl;
 pub mod apt;
@@ -30,7 +37,7 @@ pub mod disks;
 pub mod format;
 pub mod fs;
 pub mod fuse_loop;
-pub mod http;
+
 pub mod json;
 pub mod logrotate;
 pub mod loopdev;
@@ -38,7 +45,6 @@ pub mod lru_cache;
 pub mod nom;
 pub mod runtime;
 pub mod serde_filter;
-pub mod socket;
 pub mod statistics;
 pub mod subscription;
 pub mod systemd;
@@ -478,6 +484,22 @@ impl<T: Any> AsAny for T {
     }
 }
 
+/// The default 2 hours are far too long for PBS
+pub const PROXMOX_BACKUP_TCP_KEEPALIVE_TIME: u32 = 120;
+pub const DEFAULT_USER_AGENT_STRING: &'static str = "proxmox-backup-client/1.0";
+
+/// Returns a new instance of `SimpleHttp` configured for PBS usage.
+pub fn pbs_simple_http(proxy_config: Option<ProxyConfig>) -> SimpleHttp {
+    let options = SimpleHttpOptions {
+        proxy_config,
+        user_agent: Some(DEFAULT_USER_AGENT_STRING.to_string()),
+        tcp_keepalive: Some(PROXMOX_BACKUP_TCP_KEEPALIVE_TIME),
+        ..Default::default()
+    };
+
+    SimpleHttp::with_options(options)
+}
+
 /// This used to be: `SIMPLE_ENCODE_SET` plus space, `"`, `#`, `<`, `>`, backtick, `?`, `{`, `}`
 pub const DEFAULT_ENCODE_SET: &AsciiSet = &percent_encoding::CONTROLS // 0..1f and 7e
     // The SIMPLE_ENCODE_SET adds space and anything >= 0x7e (7e itself is already included above)
@@ -569,7 +591,11 @@ pub fn compute_file_csum(file: &mut File) -> Result<([u8; 32], u64), Error> {
 /// This exists to fixate the permissions for the run *base* directory while allowing intermediate
 /// directories after it to have different permissions.
 pub fn create_run_dir() -> Result<(), Error> {
-    let _: bool = proxmox::tools::fs::create_path(PROXMOX_BACKUP_RUN_DIR_M!(), None, None)?;
+    let backup_user = crate::backup::backup_user()?;
+    let opts = CreateOptions::new()
+        .owner(backup_user.uid)
+        .group(backup_user.gid);
+    let _: bool = create_path(PROXMOX_BACKUP_RUN_DIR_M!(), None, Some(opts))?;
     Ok(())
 }
 

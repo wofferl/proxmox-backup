@@ -6,8 +6,13 @@ use regex::Regex;
 
 use proxmox::api::api;
 
-use crate::tools::{self, http::SimpleHttp};
+use crate::config::node;
+use crate::tools::{
+    self,
+    pbs_simple_http,
+};
 use proxmox::tools::fs::{replace_file, CreateOptions};
+use proxmox_http::client::SimpleHttp;
 
 /// How long the local key is valid for in between remote checks
 pub const MAX_LOCAL_KEY_AGE: i64 = 15 * 24 * 3600;
@@ -102,7 +107,13 @@ async fn register_subscription(
         "check_token": challenge,
     });
 
-    let mut client = SimpleHttp::new(None); // TODO: pass proxy_config
+    let proxy_config = if let Ok((node_config, _digest)) = node::config() {
+        node_config.http_proxy()
+    } else {
+        None
+    };
+
+    let mut client = pbs_simple_http(proxy_config);
 
     let uri = "https://shop.maurer-it.com/modules/servers/licensing/verify.php";
     let query = tools::json_object_to_query(params)?;

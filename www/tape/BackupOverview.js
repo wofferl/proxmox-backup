@@ -13,35 +13,20 @@ Ext.define('PBS.TapeManagement.BackupOverview', {
 			me.reload();
 		    },
 		},
-	    }).show();
+		autoShow: true,
+	    });
 	},
 
-	restore: function(button, record) {
+	restoreBackups: function(view, rI, cI, item, e, rec) {
 	    let me = this;
-	    let view = me.getView();
-	    let selection = view.getSelection();
-	    if (!selection || selection.length < 1) {
-		return;
-	    }
 
-	    let node = selection[0];
-	    let mediaset = node.data.text;
-	    let uuid = node.data['media-set-uuid'];
-	    let datastores = node.data.datastores;
-	    while (!datastores && node.get('depth') > 2) {
-		node = node.parentNode;
-		datastores = node.data.datastores;
-	    }
+	    let mediaset = rec.data.is_media_set ? rec.data.text : rec.data['media-set'];
 	    Ext.create('PBS.TapeManagement.TapeRestoreWindow', {
+		autoShow: true,
+		uuid: rec.data['media-set-uuid'],
+		prefilter: rec.data.prefilter,
 		mediaset,
-		uuid,
-		datastores,
-		listeners: {
-		    destroy: function() {
-			me.reload();
-		    },
-		},
-	    }).show();
+	    });
 	},
 
 	loadContent: async function() {
@@ -67,6 +52,7 @@ Ext.define('PBS.TapeManagement.BackupOverview', {
 		if (data[pool][media_set] === undefined) {
 		    data[pool][media_set] = entry;
 		    data[pool][media_set].text = media_set;
+		    data[pool][media_set].restore =true;
 		    data[pool][media_set].tapes = 1;
 		    data[pool][media_set]['seq-nr'] = undefined;
 		    data[pool][media_set].is_media_set = true;
@@ -123,14 +109,15 @@ Ext.define('PBS.TapeManagement.BackupOverview', {
 	    let view = me.getView();
 
 	    Proxmox.Utils.setErrorMask(view, true);
-	    const media_set = node.data['media-set-uuid'];
+	    const media_set_uuid = node.data['media-set-uuid'];
+	    const media_set = node.data.text;
 
 	    try {
 		let list = await PBS.Async.api2({
 		    method: 'GET',
 		    url: `/api2/extjs/tape/media/content`,
 		    params: {
-			'media-set': media_set,
+			'media-set': media_set_uuid,
 		    },
 		});
 
@@ -147,8 +134,14 @@ Ext.define('PBS.TapeManagement.BackupOverview', {
 
 		for (let entry of list.result.data) {
 		    entry.text = entry.snapshot;
+		    entry.restore = true;
 		    entry.leaf = true;
 		    entry.children = [];
+		    entry['media-set'] = media_set;
+		    entry.prefilter = {
+			store: entry.store,
+			snapshot: entry.snapshot,
+		    };
 		    let iconCls = PBS.Utils.get_type_icon_cls(entry.snapshot);
 		    if (iconCls !== '') {
 			entry.iconCls = `fa ${iconCls}`;
@@ -184,6 +177,12 @@ Ext.define('PBS.TapeManagement.BackupOverview', {
 			    text,
 			    'media-set-uuid': entry['media-set-uuid'],
 			    leaf: false,
+			    restore: true,
+			    prefilter: {
+				store,
+				snapshot: `${type}/${group}/`,
+			    },
+			    'media-set': media_set,
 			    iconCls: `fa ${iconCls}`,
 			    children: [],
 			});
@@ -247,6 +246,7 @@ Ext.define('PBS.TapeManagement.BackupOverview', {
     tbar: [
 	{
 	    text: gettext('Reload'),
+	    iconCls: 'fa fa-refresh',
 	    handler: 'reload',
 	},
 	'-',
@@ -254,23 +254,27 @@ Ext.define('PBS.TapeManagement.BackupOverview', {
 	    text: gettext('New Backup'),
 	    handler: 'backup',
 	},
-	{
-	    xtype: 'proxmoxButton',
-	    disabled: true,
-	    text: gettext('Restore Media Set'),
-	    handler: 'restore',
-	    parentXType: 'treepanel',
-	    enableFn: (rec) => !!rec.data['media-set-uuid'],
-	},
     ],
 
     columns: [
 	{
 	    xtype: 'treecolumn',
-	    text: gettext('Pool/Media Set/Snapshot'),
+	    text: gettext('Pool/Media-Set/Snapshot'),
 	    dataIndex: 'text',
 	    sortable: false,
 	    flex: 3,
+	},
+	{
+	    header: gettext('Actions'),
+	    xtype: 'actioncolumn',
+	    items: [
+		{
+		    handler: 'restoreBackups',
+		    tooltip: gettext('Restore'),
+		    getClass: (v, m, rec) => rec.data.restore ? 'fa fa-fw fa-undo' : 'pmx-hidden',
+		    isDisabled: (v, r, c, i, rec) => !rec.data.restore,
+                },
+	    ],
 	},
 	{
 	    text: gettext('Tapes'),
@@ -283,7 +287,7 @@ Ext.define('PBS.TapeManagement.BackupOverview', {
 	    sortable: false,
 	},
 	{
-	    text: gettext('Media Set UUID'),
+	    text: gettext('Media-Set UUID'),
 	    dataIndex: 'media-set-uuid',
 	    hidden: true,
 	    sortable: false,

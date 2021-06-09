@@ -21,7 +21,7 @@ use crate::api2::types::{
     Authid,
 };
 
-use crate::backup::{DataStore};
+use crate::backup::DataStore;
 use crate::config::datastore;
 use crate::tools::statistics::{linear_regression};
 use crate::config::cached_user_info::CachedUserInfo;
@@ -55,6 +55,7 @@ use crate::config::acl::{
                 },
                 history: {
                     type: Array,
+                    optional: true,
                     description: "A list of usages of the past (last Month).",
                     items: {
                         type: Number,
@@ -68,6 +69,11 @@ use crate::config::acl::{
                         This is calculated via a simple Linear Regression (Least Squares)\
                         of RRD data of the last Month. Missing if there are not enough data points yet.\
                         If the estimate lies in the past, the usage is decreasing.",
+                },
+                "error": {
+                    type: String,
+                    optional: true,
+                    description: "An error description, for example, when the datastore could not be looked up.",
                 },
             },
         },
@@ -97,7 +103,19 @@ pub fn datastore_status(
             continue;
         }
 
-        let datastore = DataStore::lookup_datastore(&store)?;
+        let datastore = match DataStore::lookup_datastore(&store) {
+            Ok(datastore) => datastore,
+            Err(err) => {
+                list.push(json!({
+                    "store": store,
+                    "total": -1,
+                    "used": -1,
+                    "avail": -1,
+                    "error": err.to_string()
+                }));
+                continue;
+            }
+        };
         let status = crate::tools::disks::disk_usage(&datastore.base_path())?;
 
         let mut entry = json!({
@@ -110,24 +128,17 @@ pub fn datastore_status(
 
         let rrd_dir = format!("datastore/{}", store);
         let now = proxmox::tools::time::epoch_f64();
-        let rrd_resolution = RRDTimeFrameResolution::Month;
-        let rrd_mode = RRDMode::Average;
 
-        let total_res = crate::rrd::extract_cached_data(
+        let get_rrd = |what: &str| crate::rrd::extract_cached_data(
             &rrd_dir,
-            "total",
+            what,
             now,
-            rrd_resolution,
-            rrd_mode,
+            RRDTimeFrameResolution::Month,
+            RRDMode::Average,
         );
 
-        let used_res = crate::rrd::extract_cached_data(
-            &rrd_dir,
-            "used",
-            now,
-            rrd_resolution,
-            rrd_mode,
-        );
+        let total_res = get_rrd("total");
+        let used_res = get_rrd("used");
 
         if let (Some((start, reso, total_list)), Some((_, _, used_list))) = (total_res, used_res) {
             let mut usage_list: Vec<f64> = Vec::new();
@@ -160,13 +171,10 @@ pub fn datastore_status(
 
             // we skip the calculation for datastores with not enough data
             if usage_list.len() >= 7 {
-                entry["estimated-full-date"] = Value::from(0);
-                if let Some((a,b)) = linear_regression(&time_list, &usage_list) {
-                    if b != 0.0 {
-                        let estimate = (1.0 - a) / b;
-                        entry["estimated-full-date"] = Value::from(estimate.floor() as u64);
-                    }
-                }
+                entry["estimated-full-date"] = match linear_regression(&time_list, &usage_list) {
+                    Some((a, b)) if b != 0.0 => Value::from(((1.0 - a) / b).floor() as u64),
+                    _ => Value::from(0),
+                };
             }
         }
 

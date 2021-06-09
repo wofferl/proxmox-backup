@@ -16,9 +16,11 @@ use proxmox::try_block;
 use crate::buildcfg;
 
 pub mod acl;
+pub mod acme;
 pub mod cached_user_info;
 pub mod datastore;
 pub mod network;
+pub mod node;
 pub mod remote;
 pub mod sync;
 pub mod tfa;
@@ -204,5 +206,6 @@ pub(crate) fn set_proxy_certificate(cert_pem: &[u8], key_pem: &[u8]) -> Result<(
         .map_err(|err| format_err!("error writing certificate private key - {}", err))?;
     replace_file(&cert_path, &cert_pem, options)
         .map_err(|err| format_err!("error writing certificate file - {}", err))?;
+
     Ok(())
 }

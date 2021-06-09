@@ -368,6 +368,15 @@ Ext.define('PBS.Utils', {
 
 	// do whatever you want here
 	Proxmox.Utils.override_task_descriptions({
+	    'acme-deactivate': (type, id) =>
+		Ext.String.format(gettext("Deactivate {0} Account"), 'ACME') + ` '${id || 'default'}'`,
+	    'acme-register': (type, id) =>
+		Ext.String.format(gettext("Register {0} Account"), 'ACME') + ` '${id || 'default'}'`,
+	    'acme-update': (type, id) =>
+		Ext.String.format(gettext("Update {0} Account"), 'ACME') + ` '${id || 'default'}'`,
+	    'acme-new-cert': ['', gettext('Order Certificate')],
+	    'acme-renew-cert': ['', gettext('Renew Certificate')],
+	    'acme-revoke-cert': ['', gettext('Revoke Certificate')],
 	    backup: (type, id) => PBS.Utils.render_datastore_worker_id(id, gettext('Backup')),
 	    'barcode-label-media': [gettext('Drive'), gettext('Barcode-Label Media')],
 	    'catalog-media': [gettext('Drive'), gettext('Catalog Media')],
@@ -375,6 +384,7 @@ Ext.define('PBS.Utils', {
 	    dirremove: [gettext('Directory'), gettext('Remove')],
 	    'eject-media': [gettext('Drive'), gettext('Eject Media')],
 	    "format-media": [gettext('Drive'), gettext('Format media')],
+	    "forget-group": [gettext('Group'), gettext('Remove Group')],
 	    garbage_collection: ['Datastore', gettext('Garbage Collect')],
 	    'inventory-update': [gettext('Drive'), gettext('Inventory Update')],
 	    'label-media': [gettext('Drive'), gettext('Label Media')],
