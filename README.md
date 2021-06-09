@@ -46,7 +46,7 @@ sudo apt install ../dh-cargo_24~bpo10+pve1_all.deb
 ## Checkout proxmox backup build dependencies
 ```
 git clone https://git.proxmox.com/git/proxmox.git
-git -C proxmox checkout -b v0.11.0 1fce0ff41ddeb177f92874bf4e95a775cfd99c69
+git -C proxmox checkout -b v0.11.5 fff7b926eee01462a047444bfe61649741ed1a44
 git clone https://git.proxmox.com/git/proxmox-fuse.git
 git -C proxmox-fuse checkout -b 0.1.1 0e0966af8886c176d8decfe18cb7ead4db5a83a6
 git clone https://git.proxmox.com/git/pxar.git
