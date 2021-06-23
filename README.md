@@ -82,7 +82,7 @@ cd proxmox-mini-journalreader/ && make deb
 
 ###### proxmox-widget-toolkit
 git clone https://git.proxmox.com/git/proxmox-widget-toolkit.git
-git -C proxmox-widget-toolkit checkout -b 2.5 33d34da8a7570d97d31b37f09714f53dcd3eb6c0
+git -C proxmox-widget-toolkit checkout -b 3.1 e8c1bffbcb33f9e8881d20d2d39ea058b87f17b5
 cd proxmox-widget-toolkit/ && make deb
 
 ###### pbs-i18n
