@@ -514,6 +514,12 @@ pub const BLOCKDEVICE_NAME_SCHEMA: Schema = StringSchema::new("Block device name
     .max_length(64)
     .schema();
 
+pub const REALM_ID_SCHEMA: Schema = StringSchema::new("Realm name.")
+    .format(&PROXMOX_SAFE_ID_FORMAT)
+    .min_length(2)
+    .max_length(32)
+    .schema();
+
 // Complex type definitions
 
 #[api(
@@ -1548,8 +1554,8 @@ impl std::convert::TryFrom<openssl::rsa::Rsa<openssl::pkey::Public>> for RsaPubK
         },
     }
 )]
-#[serde(rename_all="kebab-case")]
 #[derive(Serialize,Deserialize,Default)]
+#[serde(rename_all="kebab-case")]
 /// Job Scheduling Status
 pub struct JobScheduleStatus {
     #[serde(skip_serializing_if="Option::is_none")]

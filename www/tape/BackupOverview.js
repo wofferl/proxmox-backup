@@ -17,6 +17,12 @@ Ext.define('PBS.TapeManagement.BackupOverview', {
 	    });
 	},
 
+	restore: function() {
+	    Ext.create('PBS.TapeManagement.TapeRestoreWindow', {
+		autoShow: true,
+	    });
+	},
+
 	restoreBackups: function(view, rI, cI, item, e, rec) {
 	    let me = this;
 
@@ -52,10 +58,11 @@ Ext.define('PBS.TapeManagement.BackupOverview', {
 		if (data[pool][media_set] === undefined) {
 		    data[pool][media_set] = entry;
 		    data[pool][media_set].text = media_set;
-		    data[pool][media_set].restore =true;
+		    data[pool][media_set].restore = true;
 		    data[pool][media_set].tapes = 1;
 		    data[pool][media_set]['seq-nr'] = undefined;
 		    data[pool][media_set].is_media_set = true;
+		    data[pool][media_set].typeText = 'media-set';
 		} else {
 		    data[pool][media_set].tapes++;
 		}
@@ -66,6 +73,8 @@ Ext.define('PBS.TapeManagement.BackupOverview', {
 	    for (const [pool, media_sets] of Object.entries(data)) {
 		let pool_entry = Ext.create('Ext.data.TreeModel', {
 		    text: pool,
+		    iconCls: 'fa fa-object-group',
+		    expanded: true,
 		    leaf: false,
 		});
 
@@ -154,6 +163,12 @@ Ext.define('PBS.TapeManagement.BackupOverview', {
 			    text: store,
 			    'media-set-uuid': entry['media-set-uuid'],
 			    iconCls: 'fa fa-database',
+			    typeText: 'datastore',
+			    restore: true,
+			    'media-set': media_set,
+			    prefilter: {
+				store,
+			    },
 			    tapes: {},
 			};
 		    }
@@ -184,6 +199,7 @@ Ext.define('PBS.TapeManagement.BackupOverview', {
 			    },
 			    'media-set': media_set,
 			    iconCls: `fa ${iconCls}`,
+			    typeText: `group`,
 			    children: [],
 			});
 		    }
@@ -252,7 +268,14 @@ Ext.define('PBS.TapeManagement.BackupOverview', {
 	'-',
 	{
 	    text: gettext('New Backup'),
+	    iconCls: 'fa fa-floppy-o',
 	    handler: 'backup',
+	},
+	'-',
+	{
+	    text: gettext('Restore'),
+	    iconCls: 'fa fa-undo',
+	    handler: 'restore',
 	},
     ],
 
@@ -265,12 +288,19 @@ Ext.define('PBS.TapeManagement.BackupOverview', {
 	    flex: 3,
 	},
 	{
-	    header: gettext('Actions'),
+	    header: gettext('Restore'),
 	    xtype: 'actioncolumn',
+	    dataIndex: 'text',
 	    items: [
 		{
 		    handler: 'restoreBackups',
-		    tooltip: gettext('Restore'),
+		    getTip: (v, m, rec) => {
+			let typeText = rec.get('typeText');
+			if (typeText) {
+			    v = `${typeText} '${v}'`;
+			}
+			return Ext.String.format(gettext("Open restore wizard for {0}"), v);
+		    },
 		    getClass: (v, m, rec) => rec.data.restore ? 'fa fa-fw fa-undo' : 'pmx-hidden',
 		    isDisabled: (v, r, c, i, rec) => !rec.data.restore,
                 },

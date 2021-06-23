@@ -11,8 +11,11 @@ Ext.define('PBS.TapeManagement.TapeRestoreWindow', {
     url: '/api2/extjs/tape/restore',
     method: 'POST',
 
-    showTaskViewer: true,
-    isCreate: true,
+    modal: true,
+
+    mediaset: undefined,
+    prefilter: undefined,
+    uuid: undefined,
 
     cbindData: function(config) {
 	let me = this;
@@ -27,6 +30,7 @@ Ext.define('PBS.TapeManagement.TapeRestoreWindow', {
 
     viewModel: {
 	data: {
+	    uuid: "",
 	    singleDatastore: true,
 	},
 	formulas: {
@@ -41,6 +45,13 @@ Ext.define('PBS.TapeManagement.TapeRestoreWindow', {
 
 	panelIsValid: function(panel) {
 	    return panel.query('[isFormField]').every(field => field.isValid());
+	},
+
+	changeMediaSet: function(field, value) {
+	    let me = this;
+	    let vm = me.getViewModel();
+	    vm.set('uuid', value);
+	    me.updateSnapshots();
 	},
 
 	checkValidity: function() {
@@ -149,17 +160,14 @@ Ext.define('PBS.TapeManagement.TapeRestoreWindow', {
 		    Ext.Msg.alert(gettext('Error'), response.htmlStatus);
 		},
 		success: function(response, options) {
-			// stay around so we can trigger our close events
-			// when background action is completed
+			// keep around so we can trigger our close events when background action completes
 			view.hide();
 
 			Ext.create('Proxmox.window.TaskViewer', {
 			    autoShow: true,
 			    upid: response.result.data,
 			    listeners: {
-				destroy: function() {
-				    view.close();
-				},
+				destroy: () => view.close(),
 			    },
 			});
 		},
@@ -172,9 +180,13 @@ Ext.define('PBS.TapeManagement.TapeRestoreWindow', {
 		values = [];
 	    }
 	    let datastores = {};
-	    values.forEach((snapshot) => {
-		const [datastore] = snapshot.split(':');
-		datastores[datastore] = true;
+	    values.forEach((snapshotOrDatastore) => {
+		let datastore = snapshotOrDatastore;
+		if (snapshotOrDatastore.indexOf(':') !== -1) {
+		    let snapshot = snapshotOrDatastore;
+		    let match = snapshot.split(':');
+		    datastore = match[0];
+		} datastores[datastore] = true;
 	    });
 
 	    me.setDataStores(Object.keys(datastores));
@@ -203,10 +215,12 @@ Ext.define('PBS.TapeManagement.TapeRestoreWindow', {
 	    let me = this;
 	    let view = me.getView();
 	    let grid = me.lookup('snapshotGrid');
+	    let vm = me.getViewModel();
+	    let uuid = vm.get('uuid');
 
 	    Proxmox.Utils.API2Request({
 		waitMsgTarget: view,
-		url: `/tape/media/content?media-set=${view.uuid}`,
+		url: `/tape/media/content?media-set=${uuid}`,
 		success: function(response, opt) {
 		    let datastores = {};
 		    for (const content of response.result.data) {
@@ -215,8 +229,7 @@ Ext.define('PBS.TapeManagement.TapeRestoreWindow', {
 		    me.setDataStores(Object.keys(datastores), true);
 		    if (response.result.data.length > 0) {
 			grid.setDisabled(false);
-			grid.setVisible(true);
-			grid.getStore().setData(response.result.data);
+			grid.setData(response.result.data);
 			grid.getSelectionModel().selectAll();
 			// we've shown a big list, center the window again
 			view.center();
@@ -227,6 +240,13 @@ Ext.define('PBS.TapeManagement.TapeRestoreWindow', {
 		    me.setDataStores([], true);
 		},
 	    });
+	},
+
+	init: function(view) {
+	    let me = this;
+	    let vm = me.getViewModel();
+
+	    vm.set('uuid', view.uuid);
 	},
 
 	control: {
@@ -273,10 +293,14 @@ Ext.define('PBS.TapeManagement.TapeRestoreWindow', {
 		    onGetValues: function(values) {
 			let me = this;
 
-			if (values.snapshots === 'all') {
-			    delete values.snapshots;
-			} else if (Ext.isString(values.snapshots) && values.snapshots) {
+			if (values !== "all" &&
+			    Ext.isString(values.snapshots) &&
+			    values.snapshots &&
+			    values.snapshots.indexOf(':') !== -1
+			) {
 			    values.snapshots = values.snapshots.split(',');
+			} else {
+			    delete values.snapshots;
 			}
 
 			return values;
@@ -284,10 +308,29 @@ Ext.define('PBS.TapeManagement.TapeRestoreWindow', {
 
 		    column1: [
 			{
+			    xtype: 'pbsMediaSetSelector',
+			    fieldLabel: gettext('Media-Set'),
+			    width: 350,
+			    submitValue: false,
+			    emptyText: gettext('Select Media-Set to restore'),
+			    bind: {
+				value: '{uuid}',
+			    },
+			    cbind: {
+				hidden: '{uuid}',
+				disabled: '{uuid}',
+			    },
+			    listeners: {
+				change: 'changeMediaSet',
+			    },
+			},
+			{
 			    xtype: 'displayfield',
 			    fieldLabel: gettext('Media-Set'),
 			    cbind: {
 				value: '{mediaset}',
+				hidden: '{!uuid}',
+				disabled: '{!uuid}',
 			    },
 			},
 		    ],
@@ -298,8 +341,10 @@ Ext.define('PBS.TapeManagement.TapeRestoreWindow', {
 			    fieldLabel: gettext('Media-Set UUID'),
 			    name: 'media-set',
 			    submitValue: true,
-			    cbind: {
+			    bind: {
 				value: '{uuid}',
+				hidden: '{!uuid}',
+				disabled: '{!uuid}',
 			    },
 			},
 		    ],
@@ -311,7 +356,6 @@ Ext.define('PBS.TapeManagement.TapeRestoreWindow', {
 			    name: 'snapshots',
 			    height: 322,
 			    disabled: true, // will be shown/enabled on successful load
-			    hidden: true,
 			    listeners: {
 				change: 'updateDatastores',
 			    },
@@ -552,6 +596,8 @@ Ext.define('PBS.TapeManagement.SnapshotGrid', {
 	let me = this;
 	let snapshots = [];
 
+	let storeCounts = {};
+
 	me.getSelection().forEach((rec) => {
 	    let id = rec.get('id');
 	    let store = rec.data.store;
@@ -559,6 +605,10 @@ Ext.define('PBS.TapeManagement.SnapshotGrid', {
 	    // only add if not filtered
 	    if (me.store.findExact('id', id) !== -1) {
 		snapshots.push(`${store}:${snap}`);
+		if (storeCounts[store] === undefined) {
+		    storeCounts[store] = 0;
+		}
+		storeCounts[store]++;
 	    }
 	});
 
@@ -567,6 +617,21 @@ Ext.define('PBS.TapeManagement.SnapshotGrid', {
 
 	if (snapshots.length === originalData.length) {
 	    return "all";
+	}
+
+	let wholeStores = [];
+	let wholeStoresSelected = true;
+	for (const [store, count] of Object.entries(storeCounts)) {
+	    if (me.storeCounts[store] === count) {
+		wholeStores.push(store);
+	    } else {
+		wholeStoresSelected = false;
+		break;
+	    }
+	}
+
+	if (wholeStoresSelected) {
+	    return wholeStores;
 	}
 
 	return snapshots;
@@ -596,6 +661,20 @@ Ext.define('PBS.TapeManagement.SnapshotGrid', {
 	    el.dom.setAttribute('data-errorqtip', "");
 	}
 	return [];
+    },
+
+    setData: function(records) {
+	let me = this;
+	let storeCounts = {};
+	records.forEach((rec) => {
+	    let store = rec.store;
+	    if (storeCounts[store] === undefined) {
+		storeCounts[store] = 0;
+	    }
+	    storeCounts[store]++;
+	});
+	me.storeCounts = storeCounts;
+	me.getStore().setData(records);
     },
 
     scrollable: true,
@@ -648,21 +727,69 @@ Ext.define('PBS.TapeManagement.SnapshotGrid', {
 	let me = this;
 	me.callParent();
 	if (me.prefilter !== undefined) {
-	    me.store.filters.add(
-		{
-		    id: 'x-gridfilter-store',
-		    property: 'store',
-		    operator: 'in',
-		    value: [me.prefilter.store],
-		},
-		{
-		    id: 'x-gridfilter-snapshot',
-		    property: 'snapshot',
-		    value: me.prefilter.snapshot,
-		},
-	    );
+	    if (me.prefilter.store !== undefined) {
+		me.store.filters.add(
+		    {
+			id: 'x-gridfilter-store',
+			property: 'store',
+			operator: 'in',
+			value: [me.prefilter.store],
+		    },
+		);
+	    }
+
+	    if (me.prefilter.snapshot !== undefined) {
+		me.store.filters.add(
+		    {
+			id: 'x-gridfilter-snapshot',
+			property: 'snapshot',
+			value: me.prefilter.snapshot,
+		    },
+		);
+	    }
 	}
 
 	me.mon(me.store, 'filterchange', () => me.checkChange());
+    },
+});
+
+Ext.define('PBS.TapeManagement.MediaSetSelector', {
+    extend: 'Proxmox.form.ComboGrid',
+    alias: 'widget.pbsMediaSetSelector',
+
+    allowBlank: false,
+    displayField: 'media-set-name',
+    valueField: 'media-set-uuid',
+    autoSelect: false,
+
+    store: {
+	proxy: {
+	    type: 'proxmox',
+	    url: '/api2/json/tape/media/media-sets',
+	},
+	autoLoad: true,
+	idProperty: 'media-set-uuid',
+	sorters: ['pool', 'media-set-ctime'],
+    },
+
+    listConfig: {
+	width: 600,
+	columns: [
+	    {
+		text: gettext('Pool'),
+		dataIndex: 'pool',
+		flex: 1,
+	    },
+	    {
+		text: gettext('Name'),
+		dataIndex: 'media-set-name',
+		width: 180,
+	    },
+	    {
+		text: gettext('Media-Set UUID'),
+		dataIndex: 'media-set-uuid',
+		width: 280,
+	    },
+	],
     },
 });

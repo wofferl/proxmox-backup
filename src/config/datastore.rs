@@ -13,7 +13,11 @@ use proxmox::api::{
     }
 };
 
-use proxmox::tools::{fs::replace_file, fs::CreateOptions};
+use proxmox::tools::fs::{
+    open_file_locked,
+    replace_file,
+    CreateOptions,
+};
 
 use crate::api2::types::*;
 
@@ -82,8 +86,8 @@ pub const DIR_NAME_SCHEMA: Schema = StringSchema::new("Directory name").schema()
         },
     }
 )]
-#[serde(rename_all="kebab-case")]
 #[derive(Serialize,Deserialize)]
+#[serde(rename_all="kebab-case")]
 /// Datastore configuration properties.
 pub struct DataStoreConfig {
     pub name: String,
@@ -132,6 +136,11 @@ fn init() -> SectionConfig {
 
 pub const DATASTORE_CFG_FILENAME: &str = "/etc/proxmox-backup/datastore.cfg";
 pub const DATASTORE_CFG_LOCKFILE: &str = "/etc/proxmox-backup/.datastore.lck";
+
+/// Get exclusive lock
+pub fn lock_config() -> Result<std::fs::File, Error> {
+    open_file_locked(DATASTORE_CFG_LOCKFILE, std::time::Duration::new(10, 0), true)
+}
 
 pub fn config() -> Result<(SectionConfigData, [u8;32]), Error> {
 

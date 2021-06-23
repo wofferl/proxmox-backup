@@ -1,6 +1,6 @@
 [package]
 name = "proxmox-backup"
-version = "1.1.8"
+version = "1.1.10"
 authors = [
     "Dietmar Maurer <dietmar@proxmox.com>",
     "Dominik Csapak <d.csapak@proxmox.com>",
@@ -69,7 +69,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 siphasher = "0.3"
 syslog = "4.0"
-tokio = { version = "1.0", features = [ "fs", "io-util", "io-std", "macros", "net", "parking_lot", "process", "rt", "rt-multi-thread", "signal", "time" ] }
+tokio = { version = "1.6", features = [ "fs", "io-util", "io-std", "macros", "net", "parking_lot", "process", "rt", "rt-multi-thread", "signal", "time" ] }
 tokio-openssl = "0.6.1"
 tokio-stream = "0.1.0"
 tokio-util = { version = "0.6", features = [ "codec", "io" ] }
