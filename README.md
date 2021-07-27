@@ -85,6 +85,11 @@ git clone https://git.proxmox.com/git/proxmox-widget-toolkit.git
 git -C proxmox-widget-toolkit checkout -b 3.1 e8c1bffbcb33f9e8881d20d2d39ea058b87f17b5
 cd proxmox-widget-toolkit/ && make deb
 
+###### proxmox acme
+git clone https://git.proxmox.com/git/proxmox-acme.git
+git checkout -b 1.1.0 bd6a54e6f4e238423cad46941d8216d65f128b79
+cd proxmox-acme/ && make deb
+
 ###### pbs-i18n
 git clone https://git.proxmox.com/git/proxmox-i18n.git
 cd proxmox-i18n/ && make deb
