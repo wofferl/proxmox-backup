@@ -46,6 +46,19 @@ pub struct DiskManage {
     mounted_devices: OnceCell<HashSet<dev_t>>,
 }
 
+/// Information for a device as returned by lsblk.
+#[derive(Deserialize)]
+pub struct LsblkInfo {
+    /// Path to the device.
+    path: String,
+    /// Partition type GUID.
+    #[serde(rename = "parttype")]
+    partition_type: Option<String>,
+    /// File system label.
+    #[serde(rename = "fstype")]
+    file_system_type: Option<String>,
+}
+
 impl DiskManage {
     /// Create a new disk management context.
     pub fn new() -> Arc<Self> {
@@ -555,32 +568,36 @@ pub struct BlockDevStat {
     pub io_ticks: u64, // milliseconds
 }
 
-/// Use lsblk to read partition type uuids.
-pub fn get_partition_type_info() -> Result<HashMap<String, Vec<String>>, Error> {
+/// Use lsblk to read partition type uuids and file system types.
+pub fn get_lsblk_info() -> Result<Vec<LsblkInfo>, Error> {
 
     let mut command = std::process::Command::new("lsblk");
-    command.args(&["--json", "-o", "path,parttype"]);
+    command.args(&["--json", "-o", "path,parttype,fstype"]);
 
     let output = crate::tools::run_command(command, None)?;
 
-    let mut res: HashMap<String, Vec<String>> = HashMap::new();
+    let mut output: serde_json::Value = output.parse()?;
 
-    let output: serde_json::Value = output.parse()?;
-    if let Some(list) = output["blockdevices"].as_array() {
-        for info in list {
-            let path = match info["path"].as_str() {
-                Some(p) => p,
-                None => continue,
-            };
-            let partition_type = match info["parttype"].as_str() {
-                Some(t) => t.to_owned(),
-                None => continue,
-            };
-            let devices = res.entry(partition_type).or_insert(Vec::new());
-            devices.push(path.to_string());
+    Ok(serde_json::from_value(output["blockdevices"].take())?)
+}
+
+/// Get set of devices with a file system label.
+///
+/// The set is indexed by using the unix raw device number (dev_t is u64)
+fn get_file_system_devices(
+    lsblk_info: &[LsblkInfo],
+) -> Result<HashSet<u64>, Error> {
+
+    let mut device_set: HashSet<u64> = HashSet::new();
+
+    for info in lsblk_info.iter() {
+        if info.file_system_type.is_some() {
+            let meta = std::fs::metadata(&info.path)?;
+            device_set.insert(meta.rdev());
         }
     }
-    Ok(res)
+
+    Ok(device_set)
 }
 
 #[api()]
@@ -599,6 +616,8 @@ pub enum DiskUsageType {
     DeviceMapper,
     /// Disk has partitions
     Partitions,
+    /// Disk contains a file system label
+    FileSystem,
 }
 
 #[api(
@@ -736,14 +755,16 @@ pub fn get_disks(
 
     let disk_manager = DiskManage::new();
 
-    let partition_type_map = get_partition_type_info()?;
+    let lsblk_info = get_lsblk_info()?;
 
-    let zfs_devices = zfs_devices(&partition_type_map, None).or_else(|err| -> Result<HashSet<u64>, Error> {
+    let zfs_devices = zfs_devices(&lsblk_info, None).or_else(|err| -> Result<HashSet<u64>, Error> {
         eprintln!("error getting zfs devices: {}", err);
         Ok(HashSet::new())
     })?;
 
-    let lvm_devices = get_lvm_devices(&partition_type_map)?;
+    let lvm_devices = get_lvm_devices(&lsblk_info)?;
+
+    let file_system_devices = get_file_system_devices(&lsblk_info)?;
 
     // fixme: ceph journals/volumes
 
@@ -818,6 +839,10 @@ pub fn get_disks(
                 },
                 Err(_) => continue, // skip devices if scan_partitions fail
             };
+        }
+
+        if usage == DiskUsageType::Unused && file_system_devices.contains(&devnum) {
+            usage = DiskUsageType::FileSystem;
         }
 
         if usage == DiskUsageType::Unused && disk.has_holders()? {

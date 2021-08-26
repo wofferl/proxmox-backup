@@ -1,7 +1,7 @@
 ///! Daemon binary to run inside a micro-VM for secure single file restore of disk images
 use anyhow::{bail, format_err, Error};
-use log::error;
 use lazy_static::lazy_static;
+use log::{info, error};
 
 use std::os::unix::{
     io::{FromRawFd, RawFd},
@@ -37,23 +37,30 @@ lazy_static! {
 /// This is expected to be run by 'proxmox-file-restore' within a mini-VM
 fn main() -> Result<(), Error> {
     if !Path::new(VM_DETECT_FILE).exists() {
-        bail!(concat!(
-            "This binary is not supposed to be run manually. ",
-            "Please use 'proxmox-file-restore' instead."
-        ));
+        bail!(
+            "This binary is not supposed to be run manually, use 'proxmox-file-restore' instead."
+        );
     }
 
     // don't have a real syslog (and no persistance), so use env_logger to print to a log file (via
     // stdout to a serial terminal attached by QEMU)
     env_logger::from_env(env_logger::Env::default().default_filter_or("info"))
         .write_style(env_logger::WriteStyle::Never)
+        .format_timestamp_millis()
         .init();
+
+    // the API may save some stuff there, e.g., the memcon tracking file
+    // we do not care much, but it's way less headache to just create it
+    std::fs::create_dir_all("/run/proxmox-backup")?;
 
     // scan all attached disks now, before starting the API
     // this will panic and stop the VM if anything goes wrong
+    info!("scanning all disks...");
     {
         let _disk_state = DISK_STATE.lock().unwrap();
     }
+
+    info!("disk scan complete, starting main runtime...");
 
     proxmox_backup::tools::runtime::main(run())
 }
