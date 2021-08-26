@@ -46,7 +46,7 @@ sudo apt install ../dh-cargo_24~bpo10+pve1_all.deb
 ## Checkout proxmox backup build dependencies
 ```
 git clone https://git.proxmox.com/git/proxmox.git
-git -C proxmox checkout -b v0.11.5 fff7b926eee01462a047444bfe61649741ed1a44
+git -C proxmox checkout -b v0.11.6 b900c87a8f47c3e6fc93a21fee543f83eb514947
 git clone https://git.proxmox.com/git/proxmox-fuse.git
 git -C proxmox-fuse checkout -b 0.1.1 0e0966af8886c176d8decfe18cb7ead4db5a83a6
 git clone https://git.proxmox.com/git/pxar.git
@@ -82,7 +82,7 @@ cd proxmox-mini-journalreader/ && make deb
 
 ###### proxmox-widget-toolkit
 git clone https://git.proxmox.com/git/proxmox-widget-toolkit.git
-git -C proxmox-widget-toolkit checkout -b 3.1 e8c1bffbcb33f9e8881d20d2d39ea058b87f17b5
+git -C proxmox-widget-toolkit checkout -b 2.6-1 ac4b6393d60e3f7219510af4339a4f8c9794dbe4
 cd proxmox-widget-toolkit/ && make deb
 
 ###### proxmox acme
