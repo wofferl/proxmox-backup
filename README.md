@@ -1,3 +1,5 @@
+## For new versions (>2.1) a build script can be found here: https://github.com/wofferl/proxmox-backup-arm64
+
 This is a clone of the repository https://git.proxmox.com/git/proxmox-backup.git with small changes used to compile for armbian64.
 
 Use debian buster arm64 as base image.
